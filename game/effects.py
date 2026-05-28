@@ -112,6 +112,41 @@ def draw_footprints():
 
 
 # ================================
+# SANGUE NO CHÃO
+# ================================
+def draw_blood_trails(blood_decals):
+    if not blood_decals:
+        return
+
+    glPushAttrib(GL_ENABLE_BIT | GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT)
+    glDisable(GL_LIGHTING)
+    glDisable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_POLYGON_OFFSET_FILL)
+    glPolygonOffset(-1.5, -1.5)
+
+    FLOOR_Y = -0.97
+    
+    glBegin(GL_QUADS)
+    for (bx, bz, rot) in blood_decals:
+        # Pinta uma mancha irregular de sangue escuro
+        glColor4f(0.5, 0.05, 0.05, 0.85)
+        
+        S = 0.35
+        cos_r = math.cos(rot) * S
+        sin_r = math.sin(rot) * S
+        
+        # Faz um formato não perfeitamente quadrado para parecer uma mancha
+        glVertex3f(bx - cos_r - sin_r*0.5, FLOOR_Y, bz - sin_r + cos_r*0.5)
+        glVertex3f(bx + cos_r - sin_r*0.8, FLOOR_Y, bz + sin_r + cos_r*0.8)
+        glVertex3f(bx + cos_r + sin_r*0.5, FLOOR_Y, bz + sin_r - cos_r*0.5)
+        glVertex3f(bx - cos_r + sin_r*1.2, FLOOR_Y, bz - sin_r - cos_r*1.2)
+    glEnd()
+    glPopAttrib()
+
+
+# ================================
 # BAFADAS DE FRIO
 # ================================
 def draw_breath_puffs(breath_puffs, now_ms, yaw):
@@ -146,7 +181,7 @@ def draw_breath_puffs(breath_puffs, now_ms, yaw):
 # ================================
 # HUD DE ANSIEDADE
 # ================================
-def draw_anxiety_hud(anxiety):
+def draw_anxiety_hud(anxiety, battery, hypothermia=0.0, blood_overlay_timer=0):
     W, H = DISPLAY_SIZE
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
@@ -188,9 +223,53 @@ def draw_anxiety_hud(anxiety):
     glVertex2f(BAR_X,        BAR_Y + BAR_H)
     glEnd()
 
+    # ---- Barra de Bateria ----
+    BATT_Y = BAR_Y + 18
+    BATT_FILL = int(BAR_W * battery)
+
+    glColor4f(0.0, 0.0, 0.0, 0.55)
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X - 2,        BATT_Y - 2)
+    glVertex2f(BAR_X + BAR_W+2,  BATT_Y - 2)
+    glVertex2f(BAR_X + BAR_W+2,  BATT_Y + BAR_H+2)
+    glVertex2f(BAR_X - 2,        BATT_Y + BAR_H+2)
+    glEnd()
+
+    if battery > 0.5:
+        glColor4f(0.0, 0.8, 1.0, 0.9)  # Ciano
+    elif battery > 0.2:
+        glColor4f(1.0, 0.8, 0.0, 0.9)  # Amarelo
+    else:
+        blink = abs(math.sin(pygame.time.get_ticks() / 150.0))
+        glColor4f(1.0, 0.0, 0.0, 0.5 + blink * 0.4)  # Vermelho piscante
+        
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X,             BATT_Y)
+    glVertex2f(BAR_X + BATT_FILL, BATT_Y)
+    glVertex2f(BAR_X + BATT_FILL, BATT_Y + BAR_H)
+    glVertex2f(BAR_X,             BATT_Y + BAR_H)
+    glEnd()
+
     if anxiety > 0.7:
         pulse = abs(math.sin(pygame.time.get_ticks() / 150.0))
         glColor4f(1.0, 0.0, 0.0, pulse * 0.35 * anxiety)
+        glBegin(GL_QUADS)
+        glVertex2f(0,  0); glVertex2f(W, 0)
+        glVertex2f(W, H); glVertex2f(0, H)
+        glEnd()
+
+    if hypothermia > 0.0:
+        pulse_ice = 0.5 + 0.5 * math.sin(pygame.time.get_ticks() / 200.0)
+        alpha = (hypothermia * 0.4) + (pulse_ice * 0.2 * hypothermia)
+        glColor4f(0.6, 0.8, 1.0, alpha)
+        glBegin(GL_QUADS)
+        glVertex2f(0,  0); glVertex2f(W, 0)
+        glVertex2f(W, H); glVertex2f(0, H)
+        glEnd()
+
+    if blood_overlay_timer > 0:
+        alpha = min(1.0, blood_overlay_timer / 3000.0) * 0.6  # 3 segundos máx
+        glColor4f(0.8, 0.0, 0.0, alpha)
         glBegin(GL_QUADS)
         glVertex2f(0,  0); glVertex2f(W, 0)
         glVertex2f(W, H); glVertex2f(0, H)
@@ -207,3 +286,49 @@ def clear_footprints():
     footprints.clear()
     _last_footprint_pos[0] = None
 
+def draw_ceiling_drips(zones, now_ms):
+    """Desenha gotas de sangue caindo do teto em áreas específicas."""
+    if not zones:
+        return
+        
+    from game.settings import BLOCK_SIZE
+    from game.renderer import WALL_HEIGHT
+    
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
+    glDisable(GL_LIGHTING)
+    glDisable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    
+    glColor4f(0.8, 0.0, 0.0, 0.7)
+    
+    glBegin(GL_QUADS)
+    for zx, zz in zones:
+        wx = zx * BLOCK_SIZE
+        wz = zz * BLOCK_SIZE
+        # O teto fica em WALL_HEIGHT/2, o chão em -1.0
+        # Gera gotas pseudo-aleatórias baseadas na posição e tempo
+        for i in range(5):
+            # Fase pseudo-aleatória por gota
+            phase = (zx * 13.3 + zz * 7.7 + i * 11.1) % 1000.0
+            speed = 3.0 + (i % 3)
+            drop_y = (WALL_HEIGHT/2) - ((now_ms / 1000.0 * speed + phase) % (WALL_HEIGHT/2 + 1.0))
+            
+            # Posição X e Z da gota dentro do bloco
+            drop_x = wx + ((i * 3.7) % BLOCK_SIZE) - BLOCK_SIZE/2
+            drop_z = wz + ((i * 5.1) % BLOCK_SIZE) - BLOCK_SIZE/2
+            
+            s = 0.02 # Tamanho da gota
+            
+            glVertex3f(drop_x - s, drop_y - s*3, drop_z)
+            glVertex3f(drop_x + s, drop_y - s*3, drop_z)
+            glVertex3f(drop_x + s, drop_y + s,   drop_z)
+            glVertex3f(drop_x - s, drop_y + s,   drop_z)
+            
+            glVertex3f(drop_x, drop_y - s*3, drop_z - s)
+            glVertex3f(drop_x, drop_y - s*3, drop_z + s)
+            glVertex3f(drop_x, drop_y + s,   drop_z + s)
+            glVertex3f(drop_x, drop_y + s,   drop_z - s)
+    glEnd()
+    
+    glPopAttrib()

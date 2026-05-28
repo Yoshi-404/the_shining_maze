@@ -109,7 +109,7 @@ def draw_exit(maze_map, W, H):
 
     for y in range(H):
         for x in range(W):
-            if maze_map[y][x] == 2:
+            if maze_map[y][x] == 2 or maze_map[y][x] == 3:
                 cx = (x - W/2) * BLOCK_SIZE
                 cz = (y - H/2) * BLOCK_SIZE
                 FLOOR_Y = -0.97  # Logo acima do chão para evitar z-fighting
@@ -124,8 +124,8 @@ def draw_exit(maze_map, W, H):
 
                 half = BLOCK_SIZE * 0.9
 
-                # Brilho externo (halo grande, transparente)
-                glColor4f(0.9 * pulse, 0.85 * pulse, 0.2 * pulse, 0.25 * pulse)
+                # Brilho externo (halo grande, avermelhado transparente)
+                glColor4f(0.9 * pulse, 0.1 * pulse, 0.1 * pulse, 0.25 * pulse)
                 glBegin(GL_QUADS)
                 glVertex3f(cx - half * 1.3, FLOOR_Y, cz - half * 1.3)
                 glVertex3f(cx + half * 1.3, FLOOR_Y, cz - half * 1.3)
@@ -133,8 +133,8 @@ def draw_exit(maze_map, W, H):
                 glVertex3f(cx - half * 1.3, FLOOR_Y, cz + half * 1.3)
                 glEnd()
 
-                # Quadrado principal (amarelo brilhante)
-                glColor4f(1.0 * pulse, 0.9 * pulse, 0.15, 0.7)
+                # Quadrado principal (vermelho vivo brilhante)
+                glColor4f(1.0 * pulse, 0.1, 0.1, 0.7)
                 glBegin(GL_QUADS)
                 glVertex3f(cx - half, FLOOR_Y + 0.01, cz - half)
                 glVertex3f(cx + half, FLOOR_Y + 0.01, cz - half)
@@ -144,7 +144,7 @@ def draw_exit(maze_map, W, H):
 
                 # Anel interno pulsante
                 inner = half * (0.4 + 0.15 * math.sin(t * 4.0))
-                glColor4f(1.0, 1.0, 0.6, 0.85 * pulse)
+                glColor4f(1.0, 0.5, 0.5, 0.85 * pulse)
                 glBegin(GL_QUADS)
                 glVertex3f(cx - inner, FLOOR_Y + 0.02, cz - inner)
                 glVertex3f(cx + inner, FLOOR_Y + 0.02, cz - inner)
@@ -153,6 +153,90 @@ def draw_exit(maze_map, W, H):
                 glEnd()
 
                 glPopAttrib()
+
+
+def draw_campfires(campfires):
+    if not campfires:
+        return
+    t = pygame.time.get_ticks() / 1000.0
+    pulse = 0.7 + 0.3 * math.sin(t * 5.0)
+
+    for cx, cz in campfires:
+        FLOOR_Y = -0.97
+
+        glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glDisable(GL_LIGHTING)
+        glDisable(GL_TEXTURE_2D)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        # 1. Halo no chão (menor e bem suave, para não parecer saída)
+        glEnable(GL_POLYGON_OFFSET_FILL)
+        glPolygonOffset(-2.0, -2.0)
+        half = BLOCK_SIZE * 0.5
+        glColor4f(1.0, 0.4, 0.0, 0.15 * pulse)
+        glBegin(GL_QUADS)
+        glVertex3f(cx - half, FLOOR_Y, cz - half)
+        glVertex3f(cx + half, FLOOR_Y, cz - half)
+        glVertex3f(cx + half, FLOOR_Y, cz + half)
+        glVertex3f(cx - half, FLOOR_Y, cz + half)
+        glEnd()
+        glDisable(GL_POLYGON_OFFSET_FILL)
+
+        # 2. Objeto 3D: Um pequeno "aquecedor" ou lanterna brilhante flutuando/apoiada
+        glPushMatrix()
+        # Flutua levemente
+        hover = 0.05 * math.sin(t * 3.0 + cx)
+        glTranslatef(cx, FLOOR_Y + 0.25 + hover, cz)
+        glScalef(0.12, 0.15, 0.12)  # Um pequeno pilar/caixa
+
+        glColor4f(1.0, 0.7 * pulse, 0.1, 0.9)
+        glBegin(GL_QUADS)
+        for face in _SURFACES:
+            for v in face:
+                glVertex3fv(_VERTICES[v])
+        glEnd()
+
+        # Cubo interno mais brilhante
+        glScalef(0.7, 0.7, 0.7)
+        glColor4f(1.0, 1.0, 0.8, 1.0)
+        glBegin(GL_QUADS)
+        for face in _SURFACES:
+            for v in face:
+                glVertex3fv(_VERTICES[v])
+        glEnd()
+
+        glPopMatrix()
+        glPopAttrib()
+
+
+def draw_corpse(tex_corpse, cx, cz):
+    if not tex_corpse:
+        return
+        
+    FLOOR_Y = -0.96  # Logo acima do chão e do sangue
+
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    glEnable(GL_LIGHTING)
+    glEnable(GL_TEXTURE_2D)
+    glBindTexture(GL_TEXTURE_2D, tex_corpse)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_POLYGON_OFFSET_FILL)
+    glPolygonOffset(-2.5, -2.5)
+
+    half = BLOCK_SIZE * 0.45
+    glColor3f(1.0, 1.0, 1.0)
+    
+    glBegin(GL_QUADS)
+    glNormal3f(0, 1, 0)
+    glTexCoord2f(0, 0); glVertex3f(cx - half, FLOOR_Y, cz - half)
+    glTexCoord2f(1, 0); glVertex3f(cx + half, FLOOR_Y, cz - half)
+    glTexCoord2f(1, 1); glVertex3f(cx + half, FLOOR_Y, cz + half)
+    glTexCoord2f(0, 1); glVertex3f(cx - half, FLOOR_Y, cz + half)
+    glEnd()
+
+    glPopAttrib()
 
 
 def draw_floor(tex_snow, W, H):

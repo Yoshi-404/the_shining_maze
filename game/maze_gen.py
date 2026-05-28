@@ -31,6 +31,31 @@ def generate_maze(width: int, height: int):
         for x in range(w - 2, 0, -1):
             if maze[y][x] == 0:
                 maze[y][x] = 2
-                return maze, w, h
+                break
+        if any(2 in row for row in maze):
+            break
+
+    # Encontra becos sem saída (células livres cercadas por 3 paredes)
+    dead_ends = []
+    for y in range(1, h - 1):
+        for x in range(1, w - 1):
+            if maze[y][x] == 0:
+                walls = sum(1 for dx, dy in [(0,1), (0,-1), (1,0), (-1,0)] if maze[y+dy][x+dx] == 1)
+                if walls >= 3:
+                    dead_ends.append((x, y))
+                    
+    # Filtra becos próximos ao início
+    dead_ends = [(x, y) for x, y in dead_ends if abs(x - 1) + abs(y - 1) > w]
+    random.shuffle(dead_ends)
+    
+    if len(dead_ends) > 0:
+        fx, fy = dead_ends.pop()
+        maze[fy][fx] = 3  # Falsa saída
+    
+    # Spawn up to 3 blood points / corpses
+    num_corpses = min(3, len(dead_ends))
+    for _ in range(num_corpses):
+        bx, by = dead_ends.pop()
+        maze[by][bx] = 4  # Ponto de sangue
 
     return maze, w, h
