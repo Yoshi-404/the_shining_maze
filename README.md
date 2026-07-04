@@ -1,6 +1,3 @@
-[README.txt](https://github.com/user-attachments/files/28978153/README.txt)
-
-
 1. DESCRIÇÃO DO PROJETO E MOTIVAÇÃO
 O projeto é um "Simulador de Sinuca de Boteco em 3D". O cenário é composto por uma mesa detalhada (com feltro, bordas de madeira e caçapas), um chão xadrez texturizado e bolas de sinuca sob o modelo de iluminação de Phong. O projeto inclui física de colisões e rolamento (com spin), sistema de partículas (pó de giz) e áudio espacial.
 A escolha deste tema tem um valor tem como propósito a melhoria do projeto de quando realizei a disciplina de Computação Gráfica durante os meus estudos no Japão, o meu projeto final também foi um jogo de sinuca. No entanto, era uma versão bem inicial e mal acabada (não possuía caçapas modeladas direito e usava apenas câmera ortogonal, embora já tivesse o sistema de rotação das bolas e algumas texturas). 
