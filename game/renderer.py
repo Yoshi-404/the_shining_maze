@@ -706,10 +706,10 @@ def draw_jack_billboard(tex_jack, jack_wx, jack_wz, player_x, player_z, jack_dis
 
     glBegin(GL_QUADS)
     glNormal3f(0.0, 0.0, 1.0)
-    glTexCoord2f(0.0, 1.0); glVertex3f(-half_w, 0.0, 0.0)
-    glTexCoord2f(1.0, 1.0); glVertex3f( half_w, 0.0, 0.0)
-    glTexCoord2f(1.0, 0.0); glVertex3f( half_w, h,   0.0)
-    glTexCoord2f(0.0, 0.0); glVertex3f(-half_w, h,   0.0)
+    glTexCoord2f(0.0, 0.0); glVertex3f(-half_w, 0.0, 0.0)
+    glTexCoord2f(1.0, 0.0); glVertex3f( half_w, 0.0, 0.0)
+    glTexCoord2f(1.0, 1.0); glVertex3f( half_w, h,   0.0)
+    glTexCoord2f(0.0, 1.0); glVertex3f(-half_w, h,   0.0)
     glEnd()
 
     glPopAttrib()
