@@ -2,7 +2,36 @@
 
 Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python** e **OpenGL (PyOpenGL / Pygame)** para a disciplina de **Computação Gráfica** (Universidade Federal da Grande Dourados - UFGD).
 
-Inspirado no clássico cinematográfico *The Shining* (O Iluminado, 1980) de Stanley Kubrick, o jogador assume o papel de um sobrevivente preso no labirinto de sebes do Hotel Overlook durante a noite. Sob uma nevasca congelante e escuridão quase total, você deve encontrar a saída enquanto é caçado implacavelmente por Jack Torrance.
+> [!IMPORTANT]
+> **Aviso Legal e Tributo**: Este projeto é um **fan game** acadêmico e sem fins lucrativos, inspirado na obra cinematográfica *The Shining* (O Iluminado, 1980) dirigida por **Stanley Kubrick**, baseada no romance de **Stephen King**. Todos os direitos autorais de personagens, marcas e conceitos derivados pertencem aos seus respectivos detentores (Warner Bros. Pictures e os herdeiros de Stanley Kubrick e Stephen King). O projeto foi desenvolvido com finalidade estritamente educacional sob as diretrizes de *Fair Use* (Uso Justo).
+
+---
+
+## 🎮 Gameplay
+
+<div align="center">
+  <img src="docs/images/gameplay.gif" alt="The Shining Maze - Gameplay" width="850">
+</div>
+
+### Galeria de Telas
+
+| Menu Principal | Exploração no Labirinto |
+| :---: | :---: |
+| ![Menu Principal](docs/images/screenshot_menu.png) | ![Exploração com Lanterna](docs/images/screenshot_gameplay.png) |
+
+| Perseguição de Jack Torrance | HUD de Sobrevivência e Nevasca |
+| :---: | :---: |
+| ![Encontro com Jack](docs/images/screenshot_jack.png) | ![HUD e Nevasca](docs/images/screenshot_hud.png) |
+
+---
+
+## 📦 Downloads (Executáveis Pré-Compilados)
+
+Você pode baixar os executáveis prontos para jogar diretamente na aba de [**Releases do GitHub**](https://github.com/Yoshi-404/the_shining_maze/releases):
+
+* 🪟 **Windows**: Baixe o arquivo [`The_Shining_Maze.exe`](https://github.com/Yoshi-404/the_shining_maze/releases/latest/download/The_Shining_Maze.exe) e dê dois cliques para jogar (não requer Python instalado).
+* 🍎 **macOS**: Baixe o arquivo [`The_Shining_Maze_macOS.zip`](https://github.com/Yoshi-404/the_shining_maze/releases/latest/download/The_Shining_Maze_macOS.zip), descompacte o arquivo `.app` e execute.
+  > *Nota no macOS*: Como o aplicativo não possui assinatura de desenvolvedor da Apple, na primeira execução clique com o botão direito no `.app` e selecione **Abrir**, confirmando a inicialização no Gatekeeper.
 
 ---
 
@@ -75,24 +104,28 @@ O HUD inferior apresenta três barras dinâmicas de sobrevivência:
 ## 5. Estrutura do Código-Fonte
 
 ```
-maze/
-├── main.py                 # Loop principal, máquina de estados, colisão contínua e lógica de jogo
-├── save_data.json          # Persistência de recordes, tempos e opções
-├── .gitignore              # Filtro de arquivos de compilação e caches
+the_shining_maze/
+├── main.py                     # Loop principal, máquina de estados, colisão contínua e lógica de jogo
+├── requirements.txt            # Dependências do projeto (Pygame, PyOpenGL, NumPy, PyInstaller)
+├── .gitignore                  # Filtro de compilação, binários e dados locais
+├── docs/
+│   └── images/                 # Gameplay GIF e screenshots da documentação
 ├── assets/
-│   ├── textures/           # Texturas (hedge.png, snow.png, skybox.png, jack.png, corpse.png)
-│   └── sounds/             # Áudios (footstep, heartbeat, wind, whisper, drip, battery, click)
+│   ├── textures/               # Texturas (hedge.png, snow.png, skybox.png, jack.png, corpse.png)
+│   ├── sounds/                 # Áudios (footstep, heartbeat, wind, whisper, drip, battery, click)
+│   └── scripts/
+│       └── gen_sounds.py       # Script matemático de síntese procedural de áudio WAV
 └── game/
     ├── __init__.py
-    ├── settings.py         # Configurações globais, presets de dificuldade e persistência de dados
-    ├── maze_gen.py         # Algoritmo DFS procedural e posicionamento de saídas e corpos
-    ├── renderer.py         # Chunks, Frustum Culling, iluminação, skybox, lanterna e billboards 3D
-    └── effects.py          # Partículas de neve, pegadas, HUD de 3 níveis e aberração cromática
+    ├── settings.py             # Configurações globais, presets de dificuldade e persistência de dados
+    ├── maze_gen.py             # Algoritmo DFS procedural e posicionamento de saídas e corpos
+    ├── renderer.py             # Chunks, Frustum Culling, iluminação, skybox, lanterna e billboards 3D
+    └── effects.py              # Partículas de neve, pegadas, HUD de 3 níveis e aberração cromática
 ```
 
 ---
 
-## 6. Instruções de Instalação e Execução
+## 6. Instruções de Instalação e Execução (Via Código-Fonte)
 
 ### Pré-requisitos
 * **Python 3.10+** instalado.
@@ -105,9 +138,9 @@ cd the_shining_maze
 
 ### 2. Instalar as dependências
 ```bash
-pip install pygame PyOpenGL numpy
+pip install -r requirements.txt
 ```
-*(Opcional no Windows/Linux para aceleração C: `pip install PyOpenGL_accelerate`)*
+*(Opcional no Windows/Linux para aceleração em C: `pip install PyOpenGL_accelerate`)*
 
 ### 3. Executar o jogo
 ```bash
@@ -118,4 +151,34 @@ python main.py
 
 ## 7. Pipeline de CI/CD (GitHub Actions)
 
-O repositório possui uma pipeline automatizada (`.github/workflows/build_windows.yml`) que constrói o executável standalone para Windows (`The_Shining_Maze.exe`) empacotado via PyInstaller a cada *push* na branch `main`.
+O repositório conta com uma pipeline automatizada (`.github/workflows/build_and_release.yml`) que:
+1. Constrói o executável standalone do Windows (`The_Shining_Maze.exe`).
+2. Constrói o aplicativo empacotado para macOS (`The_Shining_Maze_macOS.zip` contendo `The_Shining_Maze.app`).
+3. Publica automaticamente os binários na seção de [**Releases**](https://github.com/Yoshi-404/the_shining_maze/releases) tanto em tags de versão (`v*`) quanto em pushes para a branch `main`.
+
+---
+
+## 8. Origem e Licenças dos Assets
+
+Todos os recursos visuais e sonoros utilizados no projeto foram sintetizados proceduralmente, obtidos sob licenças livres de uso ou aplicados sob a prerrogativa de *Fair Use* para fins acadêmicos:
+
+### 8.1. Áudio e Efeitos Sonoros
+* **Síntese Procedural em Python (`assets/scripts/gen_sounds.py`)**:
+  * `wind.wav`: Síntese de ruído dinâmico passa-baixa simulando vento gélido contínuo.
+  * `footstep.wav`: Gerador de envelope duplo simulando o impacto do passo e compressão da neve.
+  * `heartbeat.wav`: Síntese acústica com sub-harmônicos reproduzindo a sístole e diástole cardíaca (*lub-dub*).
+  * `whisper1.wav` e `whisper2.wav`: Modulação estatística com curvas senoidais simulando sussurros ambientes.
+  * `drip.wav`: Variação rápida de pitch (*frequency sweep* 400Hz → 1200Hz com decaimento exponencial curto) simulando gotas.
+  * `exit.wav`: Oscilação harmônica em 60Hz com batimento indicando a proximidade da saída.
+* **Amostras Sonoras e Efeitos Complementares**:
+  * `battery.wav`, `click.wav`, `jumpscare.wav`, `grito.mp3`, `scare.mp3`: Efeitos sonoros sob licença **Creative Commons CC0 / CC-BY** (Freesound.org e bancos de domínio público).
+  * `danny1.wav`, `danny2.wav`: Amostras curtas de diálogo do filme *The Shining* (1980, Warner Bros.), utilizadas para fins de ambientação temática em fan game acadêmico (*Fair Use*).
+
+### 8.2. Texturas e Sprites
+* `hedge.png`: Textura seamless de folhagem/arbustos em alta resolução (Domínio público / CC0).
+* `snow.png`: Textura contínua de neve compacta e gelo (Domínio público / CC0).
+* `skybox.png`: Panorama noturno nublado de tempestade invernal (Domínio público / CC0).
+* `corpse.png`: Sprite 2D de sobrevivente congelado (Creative Commons CC-BY).
+* `jack.png` e `jumpscare_jack.png`: Representação visual do antagonista Jack Torrance interpretado por Jack Nicholson no filme *The Shining* (1980, Stanley Kubrick / Warner Bros. Pictures), tratada como *billboard* 3D sob *Fair Use* educacional.
+* `jumpscare_twins.png`: Representação das gêmeas Grady (*The Shining*, 1980), utilizada em sequências de pânico sob *Fair Use* educacional.
+* `jumpscare_bug.png`: Efeito gráfico estilizado de alucinação (Domínio público / CC0).

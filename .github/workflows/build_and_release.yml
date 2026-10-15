@@ -1,0 +1,120 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configurar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Gerar executavel com PyInstaller
+        run: |
+          pyinstaller --onefile --windowed --add-data "assets;assets" --name "The_Shining_Maze" main.py
+
+      - name: Salvar artefato do Windows (.exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: The_Shining_Maze_Windows
+          path: dist/The_Shining_Maze.exe
+
+  build-macos:
+    name: Build macOS (.app)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configurar o Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Gerar aplicativo macOS com PyInstaller
+        run: |
+          pyinstaller --windowed --add-data "assets:assets" --name "The_Shining_Maze" main.py
+
+      - name: Compactar The_Shining_Maze.app em ZIP
+        run: |
+          cd dist
+          ditto -c -k --keepParent The_Shining_Maze.app The_Shining_Maze_macOS.zip
+
+      - name: Salvar artefato do macOS (.zip)
+        uses: actions/upload-artifact@v4
+        with:
+          name: The_Shining_Maze_macOS
+          path: dist/The_Shining_Maze_macOS.zip
+
+  release:
+    name: Publicar no GitHub Releases
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Baixar artefato Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: The_Shining_Maze_Windows
+          path: release_assets
+
+      - name: Baixar artefato macOS
+        uses: actions/download-artifact@v4
+        with:
+          name: The_Shining_Maze_macOS
+          path: release_assets
+
+      - name: Definir Tag da Release
+        id: release_info
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "prerelease=false" >> $GITHUB_OUTPUT
+          else
+            echo "tag=latest" >> $GITHUB_OUTPUT
+            echo "prerelease=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publicar Release no GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_info.outputs.tag }}
+          name: The Shining Maze ${{ steps.release_info.outputs.tag }}
+          prerelease: ${{ steps.release_info.outputs.prerelease == 'true' }}
+          draft: false
+          generate_release_notes: true
+          files: |
+            release_assets/The_Shining_Maze.exe
+            release_assets/The_Shining_Maze_macOS.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
