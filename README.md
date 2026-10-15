@@ -1,4 +1,4 @@
-# The Shining Maze 🪓❄️
+# The Shining Maze 
 
 Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python** e **OpenGL (PyOpenGL / Pygame)** para a disciplina de **Computação Gráfica** (Universidade Federal da Grande Dourados - UFGD).
 
@@ -7,7 +7,7 @@ Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python**
 
 ---
 
-## 🎮 Gameplay
+## Gameplay
 
 <div align="center">
   <img src="docs/images/the_shining_maze_gameplay.gif" alt="The Shining Maze - Gameplay" width="850">
@@ -25,12 +25,12 @@ Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python**
 
 ---
 
-## 📦 Downloads (Executáveis Pré-Compilados)
+## Downloads (Executáveis Pré-Compilados)
 
 Você pode baixar os executáveis prontos para jogar diretamente na aba de [**Releases do GitHub**](https://github.com/Yoshi-404/the_shining_maze/releases):
 
-* 🪟 **Windows**: Baixe o arquivo [`The_Shining_Maze.exe`](https://github.com/Yoshi-404/the_shining_maze/releases/latest/download/The_Shining_Maze.exe) e dê dois cliques para jogar (não requer Python instalado).
-* 🍎 **macOS**: Baixe o arquivo [`The_Shining_Maze_macOS.zip`](https://github.com/Yoshi-404/the_shining_maze/releases/latest/download/The_Shining_Maze_macOS.zip), descompacte o arquivo `.app` e execute.
+*  **Windows**: Baixe o arquivo [`The_Shining_Maze.exe`](https://github.com/Yoshi-404/the_shining_maze/releases/latest/download/The_Shining_Maze.exe) e dê dois cliques para jogar (não requer Python instalado).
+*  **macOS**: Baixe o arquivo [`The_Shining_Maze_macOS.zip`](https://github.com/Yoshi-404/the_shining_maze/releases/latest/download/The_Shining_Maze_macOS.zip), descompacte o arquivo `.app` e execute.
   > *Nota no macOS*: Como o aplicativo não possui assinatura de desenvolvedor da Apple, na primeira execução clique com o botão direito no `.app` e selecione **Abrir**, confirmando a inicialização no Gatekeeper.
 
 ---
