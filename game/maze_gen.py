@@ -44,8 +44,12 @@ def generate_maze(width: int, height: int):
                 if walls >= 3:
                     dead_ends.append((x, y))
                     
-    # Filtra becos próximos ao início
-    dead_ends = [(x, y) for x, y in dead_ends if abs(x - 1) + abs(y - 1) > w]
+    # Prioriza becos distantes do início (1, 1)
+    filtered = [(x, y) for x, y in dead_ends if abs(x - 1) + abs(y - 1) > (w // 2)]
+    if len(filtered) >= 4:
+        dead_ends = filtered
+    else:
+        dead_ends.sort(key=lambda p: abs(p[0] - 1) + abs(p[1] - 1), reverse=True)
     random.shuffle(dead_ends)
     
     if len(dead_ends) > 0:
@@ -56,6 +60,6 @@ def generate_maze(width: int, height: int):
     num_corpses = min(3, len(dead_ends))
     for _ in range(num_corpses):
         bx, by = dead_ends.pop()
-        maze[by][bx] = 4  # Ponto de sangue
+        maze[by][bx] = 4  # Ponto de sangue / corpo
 
     return maze, w, h

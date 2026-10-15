@@ -17,13 +17,14 @@ for _ in range(NUM_PARTICLES):
         random.uniform(0.02, 0.08) # velocidade
     ])
 
-def draw_particles(player_x, player_z):
+def draw_particles(player_x, player_z, dt=0.0166):
     glPushAttrib(GL_ENABLE_BIT)
     glDisable(GL_LIGHTING)
     glDisable(GL_TEXTURE_2D)
     glPointSize(3.0) 
     glColor3fv((0.8, 0.9, 1.0)) 
     glBegin(GL_POINTS)
+    step = dt * 60.0
     for p in particles:
         px = player_x + p[0]
         py = p[1]
@@ -31,8 +32,8 @@ def draw_particles(player_x, player_z):
         
         glVertex3f(px, py, pz)
         
-        p[1] -= p[3]
-        p[0] -= 0.01
+        p[1] -= p[3] * step
+        p[0] -= 0.01 * step
         
         if p[1] < -1 or p[0] < -15:
             p[1] = 10.0
@@ -178,11 +179,10 @@ def draw_breath_puffs(breath_puffs, now_ms, yaw):
     glPopAttrib()
 
 
-# ================================
-# HUD DE ANSIEDADE
-# ================================
-def draw_anxiety_hud(anxiety, battery, hypothermia=0.0, blood_overlay_timer=0):
+def draw_anxiety_hud(anxiety, battery, stamina=1.0, hypothermia=0.0, blood_overlay_timer=0, flashlight_on=True, battery_toast_alpha=0.0):
     W, H = DISPLAY_SIZE
+    now = pygame.time.get_ticks()
+
     glMatrixMode(GL_PROJECTION)
     glPushMatrix()
     glLoadIdentity()
@@ -200,55 +200,152 @@ def draw_anxiety_hud(anxiety, battery, hypothermia=0.0, blood_overlay_timer=0):
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
     BAR_W  = 200
-    BAR_H  = 14
+    BAR_H  = 8
     BAR_X  = W // 2 - BAR_W // 2
-    BAR_Y  = H - 36
-    FILL   = int(BAR_W * anxiety)
 
-    glColor4f(0.0, 0.0, 0.0, 0.55)
+    STAMINA_Y = H - 46
+    ANXIETY_Y = H - 32
+    BATT_Y    = H - 18
+
+    # ----------------------------------------------------
+    # 1. Barra de Fôlego / Stamina (Ambar Dourado)
+    # ----------------------------------------------------
+    glColor4f(0.0, 0.0, 0.0, 0.65)
     glBegin(GL_QUADS)
-    glVertex2f(BAR_X - 2,        BAR_Y - 2)
-    glVertex2f(BAR_X + BAR_W+2,  BAR_Y - 2)
-    glVertex2f(BAR_X + BAR_W+2,  BAR_Y + BAR_H+2)
-    glVertex2f(BAR_X - 2,        BAR_Y + BAR_H+2)
+    glVertex2f(BAR_X - 2,        STAMINA_Y - 1)
+    glVertex2f(BAR_X + BAR_W+2,  STAMINA_Y - 1)
+    glVertex2f(BAR_X + BAR_W+2,  STAMINA_Y + BAR_H+1)
+    glVertex2f(BAR_X - 2,        STAMINA_Y + BAR_H+1)
     glEnd()
 
-    r = min(1.0, anxiety * 2.0)
-    g = min(1.0, (1.0 - anxiety) * 2.0)
-    glColor4f(r, g, 0.0, 0.9)
-    glBegin(GL_QUADS)
-    glVertex2f(BAR_X,        BAR_Y)
-    glVertex2f(BAR_X + FILL, BAR_Y)
-    glVertex2f(BAR_X + FILL, BAR_Y + BAR_H)
-    glVertex2f(BAR_X,        BAR_Y + BAR_H)
-    glEnd()
-
-    # ---- Barra de Bateria ----
-    BATT_Y = BAR_Y + 18
-    BATT_FILL = int(BAR_W * battery)
-
-    glColor4f(0.0, 0.0, 0.0, 0.55)
-    glBegin(GL_QUADS)
-    glVertex2f(BAR_X - 2,        BATT_Y - 2)
-    glVertex2f(BAR_X + BAR_W+2,  BATT_Y - 2)
-    glVertex2f(BAR_X + BAR_W+2,  BATT_Y + BAR_H+2)
-    glVertex2f(BAR_X - 2,        BATT_Y + BAR_H+2)
-    glEnd()
-
-    if battery > 0.5:
-        glColor4f(0.0, 0.8, 1.0, 0.9)  # Ciano
-    elif battery > 0.2:
-        glColor4f(1.0, 0.8, 0.0, 0.9)  # Amarelo
+    stam_fill = max(0, min(BAR_W, int(BAR_W * stamina)))
+    if stamina > 0.25:
+        glColor4f(0.95, 0.82, 0.22, 0.95)   # Ouro brilhante
     else:
-        blink = abs(math.sin(pygame.time.get_ticks() / 150.0))
-        glColor4f(1.0, 0.0, 0.0, 0.5 + blink * 0.4)  # Vermelho piscante
-        
+        blink_stam = 0.5 + 0.5 * abs(math.sin(now / 120.0))
+        glColor4f(0.95, 0.30 * blink_stam, 0.15, 0.95)   # Alerta de exaustão
+
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X,             STAMINA_Y)
+    glVertex2f(BAR_X + stam_fill, STAMINA_Y)
+    glVertex2f(BAR_X + stam_fill, STAMINA_Y + BAR_H)
+    glVertex2f(BAR_X,             STAMINA_Y + BAR_H)
+    glEnd()
+
+    # Marcador de corrida / fôlego à esquerda
+    glColor4f(0.95, 0.85, 0.30, 0.85 if stamina > 0.15 else 0.4)
+    glBegin(GL_TRIANGLES)
+    glVertex2f(BAR_X - 12, STAMINA_Y + BAR_H / 2.0)
+    glVertex2f(BAR_X - 6,  STAMINA_Y + 1)
+    glVertex2f(BAR_X - 6,  STAMINA_Y + BAR_H - 1)
+    glEnd()
+
+    # ----------------------------------------------------
+    # 2. Barra de Ansiedade / Pânico (Violeta -> Rubi Pulsante)
+    # ----------------------------------------------------
+    glColor4f(0.0, 0.0, 0.0, 0.65)
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X - 2,        ANXIETY_Y - 1)
+    glVertex2f(BAR_X + BAR_W+2,  ANXIETY_Y - 1)
+    glVertex2f(BAR_X + BAR_W+2,  ANXIETY_Y + BAR_H+1)
+    glVertex2f(BAR_X - 2,        ANXIETY_Y + BAR_H+1)
+    glEnd()
+
+    anx_fill = max(0, min(BAR_W, int(BAR_W * anxiety)))
+    anx_pulse = 1.0 + (0.15 * math.sin(now / 140.0) if anxiety > 0.70 else 0.0)
+    if anxiety < 0.4:
+        r_col, g_col, b_col = 0.30, 0.45, 0.75
+    elif anxiety < 0.75:
+        mix = (anxiety - 0.4) / 0.35
+        r_col = 0.30 + mix * 0.65
+        g_col = 0.45 - mix * 0.30
+        b_col = 0.75 - mix * 0.55
+    else:
+        r_col, g_col, b_col = 0.98 * anx_pulse, 0.12, 0.15
+
+    glColor4f(r_col, g_col, b_col, 0.95)
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X,            ANXIETY_Y)
+    glVertex2f(BAR_X + anx_fill, ANXIETY_Y)
+    glVertex2f(BAR_X + anx_fill, ANXIETY_Y + BAR_H)
+    glVertex2f(BAR_X,            ANXIETY_Y + BAR_H)
+    glEnd()
+
+    # Marcador de pânico à esquerda (Coração / Alerta)
+    glColor4f(r_col, g_col, b_col, 0.90)
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X - 10, ANXIETY_Y + 1)
+    glVertex2f(BAR_X - 6,  ANXIETY_Y + 1)
+    glVertex2f(BAR_X - 6,  ANXIETY_Y + BAR_H - 1)
+    glVertex2f(BAR_X - 10, ANXIETY_Y + BAR_H - 1)
+    glEnd()
+
+    # ----------------------------------------------------
+    # 3. Barra de Bateria da Lanterna (Ciano Elétrico)
+    # ----------------------------------------------------
+    glColor4f(0.0, 0.0, 0.0, 0.65)
+    glBegin(GL_QUADS)
+    glVertex2f(BAR_X - 2,        BATT_Y - 1)
+    glVertex2f(BAR_X + BAR_W+2,  BATT_Y - 1)
+    glVertex2f(BAR_X + BAR_W+2,  BATT_Y + BAR_H+1)
+    glVertex2f(BAR_X - 2,        BATT_Y + BAR_H+1)
+    glEnd()
+
+    batt_fill = max(0, min(BAR_W, int(BAR_W * battery)))
+    if not flashlight_on:
+        glColor4f(0.35, 0.35, 0.40, 0.5)
+    elif battery > 0.45:
+        glColor4f(0.0, 0.85, 1.0, 0.95)   # Ciano elétrico
+    elif battery > 0.20:
+        glColor4f(1.0, 0.85, 0.15, 0.95)  # Amarelo
+    else:
+        blink = abs(math.sin(now / 150.0))
+        glColor4f(1.0, 0.10, 0.10, 0.5 + blink * 0.45)
+
     glBegin(GL_QUADS)
     glVertex2f(BAR_X,             BATT_Y)
-    glVertex2f(BAR_X + BATT_FILL, BATT_Y)
-    glVertex2f(BAR_X + BATT_FILL, BATT_Y + BAR_H)
+    glVertex2f(BAR_X + batt_fill, BATT_Y)
+    glVertex2f(BAR_X + batt_fill, BATT_Y + BAR_H)
     glVertex2f(BAR_X,             BATT_Y + BAR_H)
     glEnd()
+
+    # LED indicador da lanterna ligada/desligada
+    led_x = BAR_X - 10
+    led_y = BATT_Y + 1
+    if flashlight_on and battery > 0.02:
+        glColor4f(1.0, 0.95, 0.4, 0.95)
+    else:
+        glColor4f(0.2, 0.2, 0.25, 0.7)
+    glBegin(GL_QUADS)
+    glVertex2f(led_x,     led_y)
+    glVertex2f(led_x + 4, led_y)
+    glVertex2f(led_x + 4, led_y + BAR_H - 2)
+    glVertex2f(led_x,     led_y + BAR_H - 2)
+    glEnd()
+
+    # Toast/Notificação visual de recarga de bateria
+    if battery_toast_alpha > 0.0:
+        toast_w = 210
+        toast_h = 16
+        toast_x = W // 2 - toast_w // 2
+        toast_y = STAMINA_Y - 22
+        glColor4f(0.04, 0.22, 0.12, 0.75 * battery_toast_alpha)
+        glBegin(GL_QUADS)
+        glVertex2f(toast_x, toast_y)
+        glVertex2f(toast_x + toast_w, toast_y)
+        glVertex2f(toast_x + toast_w, toast_y + toast_h)
+        glVertex2f(toast_x, toast_y + toast_h)
+        glEnd()
+
+        glColor4f(0.2, 0.95, 0.45, 0.9 * battery_toast_alpha)
+        glLineWidth(1.5)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(toast_x, toast_y)
+        glVertex2f(toast_x + toast_w, toast_y)
+        glVertex2f(toast_x + toast_w, toast_y + toast_h)
+        glVertex2f(toast_x, toast_y + toast_h)
+        glEnd()
+
 
     if anxiety > 0.7:
         pulse = abs(math.sin(pygame.time.get_ticks() / 150.0))

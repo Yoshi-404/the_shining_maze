@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "settings": {
+    "master_volume": 1.0,
+    "mouse_sensitivity": 0.003,
+    "fov": 70.0,
+    "head_bobbing": true,
+    "camera_shake": true,
+    "photosensitivity_mode": false,
+    "invert_mouse_y": false,
+    "difficulty": "NORMAL"
+  },
+  "progress": {
+    "completion_count": 2,
+    "total_games": 6,
+    "total_wins": 2,
+    "total_jumpscares": 2,
+    "total_batteries_collected": 5
+  },
+  "records": {
+    "best_time": 45.2,
+    "best_times_by_diff": {
+      "FACIL": null,
+      "NORMAL": 45.2,
+      "DIFICIL": null
+    },
+    "max_distance": 505.5,
+    "lowest_peak_anxiety": 0.45
+  }
+}
