@@ -10,7 +10,7 @@ Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python**
 ## 🎮 Gameplay
 
 <div align="center">
-  <img src="docs/images/gameplay.gif" alt="The Shining Maze - Gameplay" width="850">
+  <img src="docs/images/the_shining_maze_gameplay.gif" alt="The Shining Maze - Gameplay" width="850">
 </div>
 
 ### Galeria de Telas
@@ -21,7 +21,7 @@ Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python**
 
 | Perseguição de Jack Torrance | HUD de Sobrevivência e Nevasca |
 | :---: | :---: |
-| ![Encontro com Jack](docs/images/screenshot_jack.png) | ![HUD e Nevasca](docs/images/screenshot_hud.png) |
+| ![Encontro com Jack](docs/images/screenshot_jack_showcase.png) | ![HUD e Nevasca](docs/images/screenshot_hud.png) |
 
 ---
 
