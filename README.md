@@ -15,13 +15,17 @@ Um jogo de terror e sobrevivência em primeira pessoa desenvolvido em **Python**
 
 ### Galeria de Telas
 
-| Menu Principal | Exploração no Labirinto |
+| Menu Principal 3D | Exploração com Lanterna Tática |
 | :---: | :---: |
 | ![Menu Principal](docs/images/screenshot_menu.png) | ![Exploração com Lanterna](docs/images/screenshot_gameplay.png) |
 
-| Perseguição de Jack Torrance | HUD de Sobrevivência e Nevasca |
+| Perseguição de Jack Torrance (Modelo 3D) | HUD de Sobrevivência e Fogueira Segura |
 | :---: | :---: |
-| ![Encontro com Jack](docs/images/screenshot_jack_showcase.png) | ![HUD e Nevasca](docs/images/screenshot_hud.png) |
+| ![Encontro com Jack](docs/images/screenshot_jack_showcase.png) | ![HUD e Fogueira](docs/images/screenshot_hud.png) |
+
+| Portal de Saída do Hotel Overlook |
+| :---: |
+| ![Portal de Saída](docs/images/screenshot_portal.png) |
 
 ---
 

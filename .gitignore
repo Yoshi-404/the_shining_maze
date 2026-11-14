@@ -9,6 +9,7 @@ dist/
 *.toc
 *.pkg
 *.pyz
+*.spec
 *.spec.bak
 *.app/
 *.exe
