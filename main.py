@@ -20,7 +20,8 @@ from game.renderer import (
     setup_lighting, setup_fog, build_maze_display_list, load_texture, 
     draw_skybox, draw_exit, draw_floor, draw_corpse, draw_campfires,
     draw_flashlight_volumetric_shaft, draw_jack_billboard,
-    build_maze_chunks, draw_maze_optimized, draw_battery_pickup
+    build_maze_chunks, draw_maze_optimized, draw_battery_pickup,
+    cleanup_floor_display_list, draw_jumpscare_3d, draw_viewmodel_flashlight
 )
 from game.effects import (
     draw_particles, draw_footprints, draw_anxiety_hud, draw_breath_puffs,
@@ -49,7 +50,7 @@ def check_collision(x, z, radius=0.0):
         mx = math.floor((x / BLOCK_SIZE) + MAP_WIDTH / 2.0 + 0.5)
         my = math.floor((z / BLOCK_SIZE) + MAP_HEIGHT / 2.0 + 0.5)
         if 0 <= mx < MAP_WIDTH and 0 <= my < MAP_HEIGHT:
-            if maze_map[my][mx] == 1:
+            if maze_map[my][mx] in (1, 5):
                 return True
             if maze_map[my][mx] == 2:
                 return "EXIT"
@@ -71,7 +72,7 @@ def check_collision(x, z, radius=0.0):
                 return True
 
             cell_type = maze_map[my][mx]
-            if cell_type == 1:
+            if cell_type in (1, 5):
                 # Centro e limites AABB exatos da parede
                 cx = (mx - MAP_WIDTH / 2.0) * BLOCK_SIZE
                 cz = (my - MAP_HEIGHT / 2.0) * BLOCK_SIZE
@@ -117,13 +118,59 @@ def bfs_next_step(mm, mw, mh, start, goal):
         for dx, dy in [(0,1),(0,-1),(1,0),(-1,0)]:
             nx, ny = cx+dx, cy+dy
             if 0 <= nx < mw and 0 <= ny < mh and (nx,ny) not in visited:
-                if mm[ny][nx] != 1:   # não é parede
+                if mm[ny][nx] not in (1, 5):   # não é parede nem portão travado
                     step = first if first else (nx, ny)
                     if (nx, ny) == goal:
                         return step
                     visited.add((nx, ny))
                     queue.append(((nx, ny), step))
     return None
+
+
+def find_distant_open_cell(mm, mw, mh, ref_pos, avoid_pos=None):
+    """Retorna a célula aberta (0) mais distante de ref_pos, evitando proximidade com avoid_pos."""
+    best_cell = None
+    best_dist = -1
+    fallback_cell = None
+    fallback_dist = -1
+
+    for y in range(1, mh - 1):
+        for x in range(1, mw - 1):
+            if mm[y][x] != 0:
+                continue
+            d_ref = abs(x - ref_pos[0]) + abs(y - ref_pos[1])
+            if d_ref > fallback_dist:
+                fallback_dist = d_ref
+                fallback_cell = (x, y)
+            if avoid_pos is not None and abs(x - avoid_pos[0]) + abs(y - avoid_pos[1]) < 4:
+                continue
+            if d_ref > best_dist:
+                best_dist = d_ref
+                best_cell = (x, y)
+
+    if best_cell is not None:
+        return best_cell
+    return fallback_cell if fallback_cell is not None else ref_pos
+
+
+def has_line_of_sight(mm, mw, mh, cell_a, cell_b, max_cells=12):
+    """Verifica se ha linha de visao desobstruida entre duas celulas do labirinto."""
+    dx = cell_b[0] - cell_a[0]
+    dy = cell_b[1] - cell_a[1]
+    if math.hypot(dx, dy) > max_cells:
+        return False
+    steps = max(1, int(max(abs(dx), abs(dy)) * 3))
+    ax, ay = cell_a[0] + 0.5, cell_a[1] + 0.5
+    bx, by = cell_b[0] + 0.5, cell_b[1] + 0.5
+    for i in range(1, steps):
+        t = i / float(steps)
+        ix = int(math.floor(ax + (bx - ax) * t))
+        iy = int(math.floor(ay + (by - ay) * t))
+        if not (0 <= ix < mw and 0 <= iy < mh):
+            return False
+        if mm[iy][ix] == 1:
+            return False
+    return True
 
 
 def _next_pow2(n):
@@ -165,10 +212,9 @@ def calc_3d_spatial_volume(listener_x, listener_z, listener_yaw, source_x, sourc
     return max(0.0, min(1.0, vol * left_gain)), max(0.0, min(1.0, vol * right_gain))
 
 
-def create_text_texture(text, color=(160, 20, 20), font_size=56):
-    """Cria uma textura OpenGL com texto. Retorna (tex_id, u_max, v_max)."""
+def _render_font_to_gl_texture(text, color=(160, 20, 20), font_size=56, bold=False, font_name="impact"):
     try:
-        font = pygame.font.SysFont("impact", font_size)
+        font = pygame.font.SysFont(font_name, font_size, bold=bold)
     except Exception:
         font = pygame.font.Font(None, font_size)
     surf = font.render(text, True, color)
@@ -177,7 +223,7 @@ def create_text_texture(text, color=(160, 20, 20), font_size=56):
     padded = pygame.Surface((pw, ph), pygame.SRCALPHA)
     padded.fill((0, 0, 0, 0))
     padded.blit(surf, (0, 0))
-    raw = pygame.image.tostring(padded, "RGBA", True)
+    raw = pygame.image.tostring(padded, "RGBA", False)
     tid = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, tid)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
@@ -185,7 +231,220 @@ def create_text_texture(text, color=(160, 20, 20), font_size=56):
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, pw, ph, 0, GL_RGBA, GL_UNSIGNED_BYTE, raw)
-    return tid, w/pw, h/ph
+    return tid, w / pw, h / ph, w, h
+
+
+def create_text_texture(text, color=(160, 20, 20), font_size=56):
+    """Cria uma textura OpenGL com texto. Retorna (tex_id, u_max, v_max)."""
+    tid, u_max, v_max, _, _ = _render_font_to_gl_texture(
+        text, color=color, font_size=font_size, bold=False, font_name="impact"
+    )
+    return tid, u_max, v_max
+
+
+def create_ui_label_texture(text, color=(235, 240, 248), font_size=18, bold=True, font_name="arial"):
+    """Cria uma textura OpenGL nítida em proporção 1:1 para HUD e prompts. Retorna (tid, u_max, v_max, w, h)."""
+    return _render_font_to_gl_texture(
+        text, color=color, font_size=font_size, bold=bold, font_name=font_name
+    )
+
+
+def _draw_ui_label(tex_info, x, y, alpha=1.0, align="center"):
+    """Desenha uma textura de label em proporção 1:1 dentro de glOrtho(0, W, H, 0)."""
+    if not tex_info or alpha <= 0.0:
+        return
+    tid, u_max, v_max, w, h = tex_info
+    if align == "left":
+        tx = float(round(x))
+    elif align == "right":
+        tx = float(round(x - w))
+    else:
+        tx = float(round(x - w * 0.5))
+    ty = float(round(y - h * 0.5))
+
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_CURRENT_BIT)
+    glEnable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glBindTexture(GL_TEXTURE_2D, tid)
+    glColor4f(1.0, 1.0, 1.0, alpha)
+    glBegin(GL_QUADS)
+    glTexCoord2f(0.0, 0.0);     glVertex2f(tx, ty)
+    glTexCoord2f(u_max, 0.0);   glVertex2f(tx + w, ty)
+    glTexCoord2f(u_max, v_max); glVertex2f(tx + w, ty + h)
+    glTexCoord2f(0.0, v_max);   glVertex2f(tx, ty + h)
+    glEnd()
+    glPopAttrib()
+
+
+def reveal_visited_radius(visited_cells, center_cell, mw, mh, radius):
+    """Revela células no minimapa em raio euclidiano ao redor de center_cell."""
+    cx0, cy0 = center_cell
+    r_sq = radius * radius + 1
+    for ry in range(-radius, radius + 1):
+        for rx in range(-radius, radius + 1):
+            if rx * rx + ry * ry <= r_sq:
+                vx, vy = cx0 + rx, cy0 + ry
+                if 0 <= vx < mw and 0 <= vy < mh:
+                    visited_cells.add((vx, vy))
+
+
+def resolve_corpse_search(mm, mw, mh, corpse_cell, exit_grid, visited_cells, roll=None):
+    """Resolve vasculhar corpo em esquema risco vs. recompensa, sempre entregando suprimentos úteis."""
+    if roll is None:
+        roll = random.random()
+
+    if roll < 0.28:
+        reveal_visited_radius(visited_cells, corpse_cell, mw, mh, 4)
+        return {
+            "outcome": "TRAP",
+            "battery_delta": 0.30,
+            "hypo_delta": -0.20,
+            "anxiety_delta": 0.35,
+            "stamina_delta": 0.0,
+            "jumpscare": True,
+            "flicker_ms": 550,
+            "alert_jack": True,
+            "minimap_ms": 0,
+            "toast_key": "CORPSE_TRAP",
+            "toast_style": "TRAP",
+        }
+    if roll < 0.64:
+        reveal_visited_radius(visited_cells, corpse_cell, mw, mh, 6)
+        cur_step = corpse_cell
+        for _ in range(12):
+            nxt_step = bfs_next_step(mm, mw, mh, cur_step, exit_grid)
+            if not nxt_step or nxt_step == exit_grid:
+                break
+            reveal_visited_radius(visited_cells, nxt_step, mw, mh, 1)
+            cur_step = nxt_step
+        return {
+            "outcome": "MAP",
+            "battery_delta": 0.50,
+            "hypo_delta": -0.25,
+            "anxiety_delta": -0.25,
+            "stamina_delta": 0.50,
+            "jumpscare": False,
+            "flicker_ms": 0,
+            "alert_jack": False,
+            "minimap_ms": 5500,
+            "toast_key": "CORPSE_MAP",
+            "toast_style": "MAP",
+        }
+    reveal_visited_radius(visited_cells, corpse_cell, mw, mh, 3)
+    return {
+        "outcome": "KIT",
+        "battery_delta": 0.75,
+        "hypo_delta": -0.45,
+        "anxiety_delta": -0.35,
+        "stamina_delta": 1.0,
+        "jumpscare": False,
+        "flicker_ms": 0,
+        "alert_jack": False,
+        "minimap_ms": 0,
+        "toast_key": "CORPSE_KIT",
+        "toast_style": "BATTERY",
+    }
+
+
+def _draw_hud_badges_and_prompt(
+    toast_alpha, toast_tex, near_campfire, campfire_badge_tex,
+    near_unsearched, prompt_e_textures, now_ms,
+):
+    """Renderiza os labels 1:1 das pílulas do HUD e o painel chanfrado do prompt [E]."""
+    has_toast = toast_alpha > 0.0 and toast_tex is not None
+    has_camp = bool(near_campfire and campfire_badge_tex is not None)
+    has_prompt = bool(near_unsearched and prompt_e_textures)
+    if not (has_toast or has_camp or has_prompt):
+        return
+
+    W2, H2 = DISPLAY_SIZE
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+    glOrtho(0, W2, H2, 0, -1, 1)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_CURRENT_BIT)
+    glDisable(GL_LIGHTING); glDisable(GL_FOG); glDisable(GL_DEPTH_TEST)
+    glDisable(GL_TEXTURE_2D); glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+    if has_toast:
+        _draw_ui_label(toast_tex, 22.0 + 248.0 * 0.5, (H2 - 130.0) + 10.0, alpha=toast_alpha, align="center")
+
+    if has_camp:
+        camp_y = (H2 - 154.0) if toast_alpha > 0.01 else (H2 - 130.0)
+        _draw_ui_label(
+            campfire_badge_tex, 22.0 + 24.0 + (248.0 - 24.0) * 0.5, camp_y + 10.0,
+            alpha=1.0, align="center",
+        )
+
+    if has_prompt:
+        pw, ph = 346.0, 46.0
+        px = (W2 - pw) * 0.5
+        py = H2 - 118.0
+        glColor4f(0.03, 0.04, 0.06, 0.84)
+        _draw_chamfered_quad_gl(px, py, pw, ph, 6.0, filled=True)
+        glLineWidth(1.2)
+        glColor4f(0.38, 0.48, 0.60, 0.72)
+        _draw_chamfered_quad_gl(px, py, pw, ph, 6.0, filled=False)
+
+        kx, ky, kw, kh = px + 14.0, py + 9.0, 28.0, 28.0
+        glColor4f(0.14, 0.18, 0.25, 0.95)
+        _draw_chamfered_quad_gl(kx, ky, kw, kh, 4.0, filled=True)
+        kp = 0.70 + 0.30 * abs(math.sin(now_ms / 240.0))
+        glColor4f(0.88, 0.76, 0.42, kp)
+        _draw_chamfered_quad_gl(kx, ky, kw, kh, 4.0, filled=False)
+
+        _draw_ui_label(prompt_e_textures["key"], kx + kw * 0.5, ky + kh * 0.5, alpha=1.0, align="center")
+        _draw_ui_label(prompt_e_textures["title"], px + 54.0, py + 15.0, alpha=1.0, align="left")
+        _draw_ui_label(prompt_e_textures["sub"], px + 54.0, py + 32.0, alpha=1.0, align="left")
+
+    glPopAttrib()
+    glMatrixMode(GL_PROJECTION); glPopMatrix()
+    glMatrixMode(GL_MODELVIEW); glPopMatrix()
+    glEnable(GL_DEPTH_TEST)
+
+
+def _draw_trap_banner(trap_banner_textures, rem_ms, now_ms, photosensitivity_mode):
+    """Renderiza o banner chanfrado de armadilha da saída falsa."""
+    alpha = max(0.0, min(1.0, rem_ms / 450.0))
+    if alpha <= 0.0 or not trap_banner_textures:
+        return
+
+    W2, H2 = DISPLAY_SIZE
+    pw, ph = 480.0, 84.0
+    jx = math.sin(now_ms * 0.09) * 2.5 if not photosensitivity_mode else 0.0
+    jy = math.cos(now_ms * 0.13) * 1.8 if not photosensitivity_mode else 0.0
+    px = (W2 - pw) * 0.5 + jx
+    py = (H2 - ph) * 0.44 + jy
+
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+    glOrtho(0, W2, H2, 0, -1, 1)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_CURRENT_BIT)
+    glDisable(GL_LIGHTING); glDisable(GL_FOG); glDisable(GL_DEPTH_TEST)
+    glDisable(GL_TEXTURE_2D); glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+    glColor4f(0.12, 0.02, 0.03, 0.88 * alpha)
+    _draw_chamfered_quad_gl(px, py, pw, ph, 8.0, filled=True)
+    glLineWidth(1.5)
+    glColor4f(0.86, 0.16, 0.18, 0.92 * alpha)
+    _draw_chamfered_quad_gl(px, py, pw, ph, 8.0, filled=False)
+
+    glLineWidth(1.0)
+    glColor4f(0.92, 0.25, 0.22, 0.55 * alpha)
+    glBegin(GL_LINES)
+    glVertex2f(px + 28.0, py + 7.0); glVertex2f(px + pw - 28.0, py + 7.0)
+    glVertex2f(px + 28.0, py + ph - 7.0); glVertex2f(px + pw - 28.0, py + ph - 7.0)
+    glEnd()
+
+    _draw_ui_label(trap_banner_textures["sub"], px + pw * 0.5, py + 22.0, alpha=alpha, align="center")
+    _draw_ui_label(trap_banner_textures["title"], px + pw * 0.5, py + 54.0, alpha=alpha, align="center")
+
+    glPopAttrib()
+    glMatrixMode(GL_PROJECTION); glPopMatrix()
+    glMatrixMode(GL_MODELVIEW); glPopMatrix()
+    glEnable(GL_DEPTH_TEST)
 
 
 def setup_wall_texts(mm, mw, mh):
@@ -242,10 +501,13 @@ def cleanup_chromatic_aberration_texture():
 def draw_chromatic_aberration(intensity):
     """Captura o backbuffer e re-renderiza separando canais RGB."""
     global _chroma_tex_id
-    W, H = DISPLAY_SIZE
-    off = int(intensity * 10)
-    if off < 1:
+    if _gs.photosensitivity_mode:
         return
+    W, H = DISPLAY_SIZE
+    shift_px = intensity * 10.0
+    if shift_px < 1.0:
+        return
+    du = shift_px / W
     # Captura cena atual reutilizando textura existente
     if _chroma_tex_id is None:
         _chroma_tex_id = glGenTextures(1)
@@ -271,17 +533,17 @@ def draw_chromatic_aberration(intensity):
     glBlendFunc(GL_ONE, GL_ONE)   # Aditivo para mistura dos canais
     glClear(GL_COLOR_BUFFER_BIT)
 
-    def _quad(x0):
+    def _quad(u_shift):
         glBegin(GL_QUADS)
-        glTexCoord2f(0,0); glVertex2f(x0,     0)
-        glTexCoord2f(1,0); glVertex2f(x0 + W, 0)
-        glTexCoord2f(1,1); glVertex2f(x0 + W, H)
-        glTexCoord2f(0,1); glVertex2f(x0,     H)
+        glTexCoord2f(0.0 + u_shift, 0.0); glVertex2f(0, 0)
+        glTexCoord2f(1.0 + u_shift, 0.0); glVertex2f(W, 0)
+        glTexCoord2f(1.0 + u_shift, 1.0); glVertex2f(W, H)
+        glTexCoord2f(0.0 + u_shift, 1.0); glVertex2f(0, H)
         glEnd()
 
-    glColorMask(GL_TRUE,  GL_FALSE, GL_FALSE, GL_TRUE); _quad(-off)  # Red  → direita
-    glColorMask(GL_FALSE, GL_TRUE,  GL_FALSE, GL_TRUE); _quad(0)     # Green → centro
-    glColorMask(GL_FALSE, GL_FALSE, GL_TRUE,  GL_TRUE); _quad(off)   # Blue  → esquerda
+    glColorMask(GL_TRUE,  GL_FALSE, GL_FALSE, GL_TRUE); _quad(du)   # Red  → direita
+    glColorMask(GL_FALSE, GL_TRUE,  GL_FALSE, GL_TRUE); _quad(0.0)  # Green → centro
+    glColorMask(GL_FALSE, GL_FALSE, GL_TRUE,  GL_TRUE); _quad(-du)  # Blue  → esquerda
     glColorMask(GL_TRUE,  GL_TRUE,  GL_TRUE,  GL_TRUE)
 
     glPopAttrib()
@@ -293,57 +555,134 @@ def draw_chromatic_aberration(intensity):
 # ESTADOS DO JOGO
 # ================================
 
-def draw_minimap(mm, mw, mh, px, pz):
+def _draw_chamfered_quad_gl(x, y, w, h, chamfer, filled=True):
+    pts = (
+        (x + chamfer, y), (x + w - chamfer, y),
+        (x + w, y + chamfer), (x + w, y + h - chamfer),
+        (x + w - chamfer, y + h), (x + chamfer, y + h),
+        (x, y + h - chamfer), (x, y + chamfer),
+    )
+    glBegin(GL_POLYGON if filled else GL_LINE_LOOP)
+    for px, py in pts:
+        glVertex2f(px, py)
+    glEnd()
+
+
+def draw_minimap(mm, mw, mh, px, pz, yaw=0.0, visited_cells=None, campfires=None, corpses=None, jack_dist=999.0, now_ms=None):
     W, H = DISPLAY_SIZE
-    size = 180
-    margin = 20
+    size = 196
+    margin = 22
+    x0 = W - size - margin
+    y0 = margin
+    pad = 10
+    map_size = size - 2 * pad
+    mx0 = x0 + pad
+    my0 = y0 + pad
+    now = pygame.time.get_ticks() if now_ms is None else now_ms
+
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
     glOrtho(0, W, H, 0, -1, 1)
     glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
-    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_POINT_BIT)
     glDisable(GL_LIGHTING); glDisable(GL_FOG); glDisable(GL_DEPTH_TEST)
     glDisable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-    # Background
-    glColor4f(0.0, 0.0, 0.0, 0.7)
-    glBegin(GL_QUADS)
-    glVertex2f(W - size - margin, margin)
-    glVertex2f(W - margin, margin)
-    glVertex2f(W - margin, margin + size)
-    glVertex2f(W - size - margin, margin + size)
-    glEnd()
+    # Moldura chanfrada escura
+    glColor4f(0.03, 0.04, 0.06, 0.84)
+    _draw_chamfered_quad_gl(x0, y0, size, size, 8.0, filled=True)
 
-    # Cells
-    cell_w = size / mw
-    cell_h = size / mh
+    glLineWidth(1.5)
+    if jack_dist < BLOCK_SIZE * 7.0:
+        pulse = 0.70 + 0.25 * abs(math.sin(now / 160.0))
+        glColor4f(0.90, 0.16, 0.16, pulse)
+    else:
+        glColor4f(0.34, 0.42, 0.52, 0.55)
+    _draw_chamfered_quad_gl(x0, y0, size, size, 8.0, filled=False)
+
+    # Celulas exploradas (Fog of War)
+    cell_w = map_size / mw
+    cell_h = map_size / mh
+    gold_pulse = 0.78 + 0.17 * abs(math.sin(now / 220.0))
     glBegin(GL_QUADS)
     for y in range(mh):
         for x in range(mw):
-            if mm[y][x] == 1:
-                glColor4f(0.8, 0.8, 0.8, 0.9)
-            elif mm[y][x] == 2:
-                glColor4f(0.8, 0.1, 0.1, 0.9)
-            else:
+            if visited_cells is not None and (x, y) not in visited_cells:
                 continue
-            cx = W - size - margin + x * cell_w
-            cy = margin + y * cell_h
+            val = mm[y][x]
+            if val == 1:
+                glColor4f(0.34, 0.44, 0.38, 0.92)
+            elif val == 2:
+                glColor4f(0.98, 0.82, 0.20, min(0.98, gold_pulse))
+            elif val == 5:
+                glColor4f(0.55, 0.12, 0.14, 0.90)
+            else:
+                glColor4f(0.11, 0.14, 0.19, 0.72)
+            cx = mx0 + x * cell_w
+            cy = my0 + y * cell_h
             glVertex2f(cx, cy)
             glVertex2f(cx + cell_w, cy)
             glVertex2f(cx + cell_w, cy + cell_h)
             glVertex2f(cx, cy + cell_h)
+
+    # Marcadores descobertos (Fogueiras e Corpos nao vasculhados)
+    inset_x = cell_w * 0.18
+    inset_y = cell_h * 0.18
+    if campfires:
+        glColor4f(1.0, 0.55, 0.12, 0.95)
+        for fx, fz in campfires:
+            gx = int(round(fx / BLOCK_SIZE + mw / 2.0))
+            gy = int(round(fz / BLOCK_SIZE + mh / 2.0))
+            if visited_cells is None or (gx, gy) in visited_cells:
+                cx = mx0 + gx * cell_w + inset_x
+                cy = my0 + gy * cell_h + inset_y
+                glVertex2f(cx, cy)
+                glVertex2f(cx + cell_w - 2 * inset_x, cy)
+                glVertex2f(cx + cell_w - 2 * inset_x, cy + cell_h - 2 * inset_y)
+                glVertex2f(cx, cy + cell_h - 2 * inset_y)
+
+    if corpses:
+        glColor4f(0.82, 0.22, 0.35, 0.90)
+        for c in corpses:
+            if c.get("searched"):
+                continue
+            gx = int(round(c["pos"][0] / BLOCK_SIZE + mw / 2.0))
+            gy = int(round(c["pos"][1] / BLOCK_SIZE + mh / 2.0))
+            if visited_cells is None or (gx, gy) in visited_cells:
+                cx = mx0 + gx * cell_w + inset_x
+                cy = my0 + gy * cell_h + inset_y
+                glVertex2f(cx, cy)
+                glVertex2f(cx + cell_w - 2 * inset_x, cy)
+                glVertex2f(cx + cell_w - 2 * inset_x, cy + cell_h - 2 * inset_y)
+                glVertex2f(cx, cy + cell_h - 2 * inset_y)
     glEnd()
 
-    # Player position (centralizado na célula)
+    # Cone de visao + seta direcional do jogador
     map_x = (px / BLOCK_SIZE) + mw / 2.0
     map_y = (pz / BLOCK_SIZE) + mh / 2.0
-    px_screen = W - size - margin + (map_x + 0.5) * cell_w
-    py_screen = margin + (map_y + 0.5) * cell_h
-    glColor4f(0.1, 0.9, 0.1, 1.0)
-    glPointSize(6.0)
-    glBegin(GL_POINTS)
+    px_screen = mx0 + (map_x + 0.5) * cell_w
+    py_screen = my0 + (map_y + 0.5) * cell_h
+    cone_len = 15.0
+    cone_spread = 0.48
+    tip_r = 5.5
+    back_r = 4.2
+
+    glBegin(GL_TRIANGLES)
+    glColor4f(0.20, 0.85, 1.0, 0.22)
     glVertex2f(px_screen, py_screen)
+    glVertex2f(px_screen + math.cos(yaw - cone_spread) * cone_len,
+               py_screen + math.sin(yaw - cone_spread) * cone_len)
+    glVertex2f(px_screen + math.cos(yaw + cone_spread) * cone_len,
+               py_screen + math.sin(yaw + cone_spread) * cone_len)
+
+    glColor4f(0.25, 0.98, 0.65, 1.0)
+    glVertex2f(px_screen + math.cos(yaw) * tip_r,
+               py_screen + math.sin(yaw) * tip_r)
+    glVertex2f(px_screen + math.cos(yaw - 2.35) * back_r,
+               py_screen + math.sin(yaw - 2.35) * back_r)
+    glVertex2f(px_screen + math.cos(yaw + 2.35) * back_r,
+               py_screen + math.sin(yaw + 2.35) * back_r)
     glEnd()
 
     glPopAttrib()
@@ -352,7 +691,7 @@ def draw_minimap(mm, mw, mh, px, pz):
     glEnable(GL_DEPTH_TEST)
 
 
-def draw_jack_shadow(jack_wx, jack_wz, jack_dist, madness):
+def draw_jack_shadow(jack_wx, jack_wz, jack_dist, madness, now_ms=None):
     """Desenha uma sombra/silhueta escura e pulsante no chão na posição do Jack."""
     MAX_SHADOW_DIST = 12.0
     if jack_dist > MAX_SHADOW_DIST:
@@ -360,7 +699,7 @@ def draw_jack_shadow(jack_wx, jack_wz, jack_dist, madness):
     alpha = (1.0 - jack_dist / MAX_SHADOW_DIST) * (0.4 + madness * 0.4)
     FLOOR_Y = -0.96
     SHADOW_SIZE = BLOCK_SIZE * 0.7
-    t = pygame.time.get_ticks() / 1000.0
+    t = (pygame.time.get_ticks() if now_ms is None else now_ms) / 1000.0
     pulse = 1.0 + 0.15 * math.sin(t * 3.0)
     size = SHADOW_SIZE * pulse
 
@@ -412,6 +751,89 @@ def cleanup_pause_overlay_texture():
     _last_pause_state = None
 
 
+def _chamfer_points_2d(rect, c=8):
+    x, y, w, h = rect
+    return [
+        (x + c, y), (x + w - c, y),
+        (x + w, y + c), (x + w, y + h - c),
+        (x + w - c, y + h), (x + c, y + h),
+        (x, y + h - c), (x, y + c),
+    ]
+
+
+def _draw_chamfered_pygame(surf, rect, c, fill_col, border_col=None, border_w=2):
+    pts = _chamfer_points_2d(rect, c)
+    pygame.draw.polygon(surf, fill_col, pts)
+    if border_col is not None:
+        pygame.draw.polygon(surf, border_col, pts, border_w)
+
+
+def _draw_menu_button(surf, rect, label, font, selected, danger=False):
+    fill = (32, 16, 18, 225) if (selected and danger) else (
+        (22, 30, 40, 228) if selected else (10, 12, 18, 195)
+    )
+    border = (220, 65, 65, 240) if (selected and danger) else (
+        (235, 195, 75, 240) if selected else (75, 90, 110, 150)
+    )
+    _draw_chamfered_pygame(surf, rect, 7, fill, border, 2 if selected else 1)
+    if selected:
+        bar_col = (210, 45, 45, 240) if danger else (225, 175, 55, 240)
+        pygame.draw.rect(surf, bar_col, (rect.x + 5, rect.y + 7, 4, rect.h - 14))
+    tcol = (255, 235, 130) if selected else (195, 200, 210)
+    txt = font.render(label, True, tcol)
+    surf.blit(txt, txt.get_rect(center=rect.center))
+
+
+def _apply_setting_change(sel, step_dir, vol, sens, update_gl_proj=False):
+    """Aplica alteracao incremental ou alternancia a um item das configuracoes."""
+    if sel == 0:
+        vol = max(0.0, min(2.0, round(vol + 0.1 * step_dir, 2)))
+        _gs.master_volume = vol
+    elif sel == 1:
+        sens = max(1.0, min(10.0, round(sens + 1.0 * step_dir)))
+        _gs.mouse_sensitivity = sens / 1000.0
+    elif sel == 2:
+        idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
+        _gs.difficulty = _gs.DIFFICULTIES[(idx + step_dir) % len(_gs.DIFFICULTIES)]
+    elif sel == 3:
+        _gs.fov = max(60.0, min(95.0, _gs.fov + 5.0 * step_dir))
+        if update_gl_proj:
+            glMatrixMode(GL_PROJECTION); glLoadIdentity()
+            gluPerspective(_gs.fov, (DISPLAY_SIZE[0] / DISPLAY_SIZE[1]), 0.1, 80.0)
+            glMatrixMode(GL_MODELVIEW)
+    elif sel == 4:
+        _gs.head_bobbing = not _gs.head_bobbing
+    elif sel == 5:
+        _gs.camera_shake = not _gs.camera_shake
+    elif sel == 6:
+        _gs.photosensitivity_mode = not _gs.photosensitivity_mode
+    elif sel == 7:
+        _gs.invert_mouse_y = not _gs.invert_mouse_y
+    return vol, sens, (sel == 8)
+
+
+def _format_settings_items(vol, sens, back_label):
+    diff_data = _gs.DIFFICULTY_PRESETS.get(_gs.difficulty, {})
+    diff_str = f"{diff_data.get('label', _gs.difficulty)}"
+    return [
+        f"<  Volume Geral: {int(vol * 100)}%  >",
+        f"<  Sensibilidade Mouse: {int(sens)}  >",
+        f"<  Dificuldade: {diff_str}  >",
+        f"<  Campo de Visao (FOV): {int(_gs.fov)}°  >",
+        f"Balanco de Camera (Bobbing): {'Ligado' if _gs.head_bobbing else 'Desligado'}",
+        f"Tremores de Camera (Shake): {'Ligado' if _gs.camera_shake else 'Desligado'}",
+        f"Fotosensibilidade (Sem Flashes): {'Ligado' if _gs.photosensitivity_mode else 'Desligado'}",
+        f"Inverter Eixo Y: {'Sim' if _gs.invert_mouse_y else 'Nao'}",
+        back_label,
+    ]
+
+
+def _get_pause_menu_rects(W, H, in_settings):
+    if not in_settings:
+        return [pygame.Rect(W // 2 - 205, H // 2 - 44 + i * 60, 410, 46) for i in range(3)]
+    return [pygame.Rect(W // 2 - 300, 155 + i * 44 - 18, 600, 36) for i in range(9)]
+
+
 def draw_pause_overlay(selected, in_settings, vol, sens, settings_sel):
     """Renderiza o menu de pausa como overlay OpenGL sobre a cena congelada."""
     global _pause_tex_id, _last_pause_state
@@ -431,58 +853,43 @@ def draw_pause_overlay(selected, in_settings, vol, sens, settings_sel):
 
     if state_key != _last_pause_state:
         overlay = pygame.Surface((W, H), pygame.SRCALPHA)
-        overlay.fill((0, 0, 0, 180))
+        overlay.fill((4, 6, 10, 145))
         try:
-            tfont = pygame.font.SysFont("impact", 68)
-            ofont_main = pygame.font.SysFont("arial", 36)
-            ofont_set = pygame.font.SysFont("arial", 25)
-            hfont = pygame.font.SysFont("arial", 21)
+            tfont = pygame.font.SysFont("impact", 64)
+            ofont_main = pygame.font.SysFont("arial", 26)
+            ofont_set = pygame.font.SysFont("arial", 22)
+            hfont = pygame.font.SysFont("arial", 19)
         except Exception:
-            tfont = pygame.font.Font(None, 68)
-            ofont_main = pygame.font.Font(None, 36)
-            ofont_set = pygame.font.Font(None, 25)
-            hfont = pygame.font.Font(None, 21)
+            tfont = pygame.font.Font(None, 64)
+            ofont_main = pygame.font.Font(None, 26)
+            ofont_set = pygame.font.Font(None, 22)
+            hfont = pygame.font.Font(None, 19)
 
+        rects = _get_pause_menu_rects(W, H, in_settings)
         if not in_settings:
-            title = tfont.render("PAUSA", True, (210, 210, 210))
-            overlay.blit(title, title.get_rect(center=(W // 2, H // 2 - 130)))
+            panel_rect = pygame.Rect(W // 2 - 245, H // 2 - 190, 490, 360)
+            _draw_chamfered_pygame(overlay, panel_rect, 12, (8, 10, 15, 220), (85, 100, 120, 175), 2)
+            title = tfont.render("PAUSA", True, (220, 225, 232))
+            overlay.blit(title, title.get_rect(center=(W // 2, H // 2 - 125)))
             options = ["Continuar", "Configuracoes & Acessibilidade", "Sair ao Menu"]
-            for i, opt in enumerate(options):
-                color = (255, 255, 80) if i == selected else (170, 170, 170)
-                prefix = "> " if i == selected else "  "
-                surf = ofont_main.render(prefix + opt, True, color)
-                overlay.blit(surf, surf.get_rect(center=(W // 2, H // 2 - 20 + i * 60)))
-            hint = hfont.render("[SETAS] Navegar  |  ENTER Selecionar  |  ESC Retomar",
-                                True, (120, 120, 120))
-            overlay.blit(hint, hint.get_rect(center=(W // 2, H - 40)))
+            for i, (opt, rect) in enumerate(zip(options, rects)):
+                _draw_menu_button(overlay, rect, opt, ofont_main, i == selected, danger=(i == 2))
+            hint = hfont.render("[MOUSE / SETAS] Selecionar  |  [ENTER / CLIQUE] Confirmar  |  [ESC] Retomar",
+                                True, (150, 160, 175))
+            overlay.blit(hint, hint.get_rect(center=(W // 2, H - 38)))
         else:
-            title = tfont.render("CONFIGURACOES", True, (210, 210, 210))
-            overlay.blit(title, title.get_rect(center=(W // 2, 85)))
-            
-            diff_label = _gs.DIFFICULTY_PRESETS.get(_gs.difficulty, {}).get("label", _gs.difficulty)
-            items = [
-                f"Volume Geral: {int(vol * 100)}%",
-                f"Sensibilidade Mouse: {int(sens)}",
-                f"Dificuldade: {diff_label} (Aplica no proximo labirinto)",
-                f"Campo de Visao (FOV): {int(_gs.fov)}°",
-                f"Balanco de Camera (Bobbing): {'Ligado' if _gs.head_bobbing else 'Desligado'}",
-                f"Tremores de Camera (Shake): {'Ligado' if _gs.camera_shake else 'Desligado'}",
-                f"Fotosensibilidade (Sem Flashes): {'Ligado' if _gs.photosensitivity_mode else 'Desligado'}",
-                f"Inverter Eixo Y: {'Sim' if _gs.invert_mouse_y else 'Nao'}",
-                "Voltar ao Menu de Pausa"
-            ]
-            
-            start_y = 155
-            spacing = 44
-            for i, item in enumerate(items):
-                color = (255, 255, 80) if i == settings_sel else (175, 175, 175)
-                prefix = "> " if i == settings_sel else "  "
-                surf = ofont_set.render(prefix + item, True, color)
-                overlay.blit(surf, surf.get_rect(center=(W // 2, start_y + i * spacing)))
-                
-            hint = hfont.render("[ESQ/DIR ou ENTER] Ajustar  |  [SETAS CIMA/BAIXO] Navegar  |  ESC Voltar",
-                                True, (130, 130, 130))
-            overlay.blit(hint, hint.get_rect(center=(W // 2, H - 35)))
+            panel_rect = pygame.Rect(W // 2 - 340, 42, 680, H - 84)
+            _draw_chamfered_pygame(overlay, panel_rect, 12, (8, 10, 15, 225), (85, 100, 120, 175), 2)
+            title = tfont.render("CONFIGURACOES", True, (220, 225, 232))
+            overlay.blit(title, title.get_rect(center=(W // 2, 92)))
+
+            items = _format_settings_items(vol, sens, "Voltar ao Menu de Pausa")
+            for i, (item, rect) in enumerate(zip(items, rects)):
+                _draw_menu_button(overlay, rect, item, ofont_set, i == settings_sel)
+
+            hint = hfont.render("[CLIQUE ESQ/DIR ou SETAS] Ajustar  |  [ESC] Voltar",
+                                True, (150, 160, 175))
+            overlay.blit(hint, hint.get_rect(center=(W // 2, H - 30)))
 
         raw = pygame.image.tostring(overlay, "RGBA", True)
         glBindTexture(GL_TEXTURE_2D, _pause_tex_id)
@@ -511,18 +918,137 @@ def draw_pause_overlay(selected, in_settings, vol, sens, settings_sel):
 
 
 _gl_screen_tex_id = None
+_menu_3d_cache = None
+
+
+def _get_menu_3d_scene():
+    """Constroi e armazena em cache o diorama 3D usado no fundo dos menus."""
+    global _menu_3d_cache
+    if _menu_3d_cache is not None:
+        return _menu_3d_cache
+
+    mw, mh = 9, 9
+    mm = [[1] * mw for _ in range(mh)]
+    for y in range(2, mh - 1):
+        mm[y][4] = 0
+    mm[1][4] = 2
+    mm[4][3] = 0
+    mm[4][5] = 0
+    mm[6][3] = 0
+    mm[6][5] = 0
+
+    tex_hedge = load_texture(tex("hedge.png"))
+    tex_snow = load_texture(tex("snow.png"))
+    tex_skybox = load_texture(tex("skybox.png"))
+    tex_jack = None
+    chunks = build_maze_chunks(tex_hedge, mm, mw, mh, chunk_size=5)
+
+    _menu_3d_cache = {
+        "maze": mm,
+        "mw": mw,
+        "mh": mh,
+        "chunks": chunks,
+        "tex_hedge": tex_hedge,
+        "tex_snow": tex_snow,
+        "tex_skybox": tex_skybox,
+        "tex_jack": tex_jack,
+    }
+    return _menu_3d_cache
+
+
+def draw_menu_background_3d(now_ms, mode="MENU"):
+    """Renderiza uma cena 3D ao vivo do labirinto nevado no fundo dos menus."""
+    scene = _get_menu_3d_scene()
+    W, H = DISPLAY_SIZE
+    t_s = now_ms / 1000.0
+
+    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
+    gluPerspective(60.0, W / H, 0.1, 80.0)
+    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+
+    glEnable(GL_DEPTH_TEST)
+    fog_col = setup_fog()
+    if mode == "END":
+        fog_col = (0.07, 0.015, 0.02, 1.0)
+        glFogfv(GL_FOG_COLOR, fog_col)
+        glFogf(GL_FOG_DENSITY, 0.105)
+    else:
+        glFogf(GL_FOG_DENSITY, 0.085)
+
+    glClearColor(*fog_col)
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    setup_lighting()
+
+    cx = -1.0 + math.sin(t_s * 0.36) * 0.45
+    cy = 0.68 + math.sin(t_s * 0.62) * 0.06
+    cz = 4.6 + math.cos(t_s * 0.24) * 0.30
+    lx = -1.0 + math.sin(t_s * 0.26) * 0.20
+    ly = 0.28
+    lz = -3.8
+    gluLookAt(cx, cy, cz, lx, ly, lz, 0, 1, 0)
+
+    cam_dir = (lx - cx, ly - cy, lz - cz)
+    glLightfv(GL_LIGHT0, GL_POSITION, (cx, cy, cz, 1.0))
+    glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, cam_dir)
+    glLightfv(GL_LIGHT0, GL_DIFFUSE, (1.5, 1.48, 1.65, 1.0))
+    glLightfv(GL_LIGHT1, GL_POSITION, (cx, cy - 0.3, cz, 1.0))
+    glLightfv(GL_LIGHT1, GL_DIFFUSE, (0.09, 0.10, 0.13, 1.0))
+
+    cf_pos = (-1.0, -3.0)
+    cf_flicker = 1.0 if _gs.photosensitivity_mode else (
+        0.90 + 0.10 * math.sin(t_s * 12.5) + 0.05 * math.cos(t_s * 21.0)
+    )
+    glEnable(GL_LIGHT2)
+    glLightfv(GL_LIGHT2, GL_POSITION, (cf_pos[0], -0.35, cf_pos[1], 1.0))
+    if mode == "END":
+        glLightfv(GL_LIGHT2, GL_DIFFUSE, (1.45 * cf_flicker, 0.22 * cf_flicker, 0.12 * cf_flicker, 1.0))
+    else:
+        glLightfv(GL_LIGHT2, GL_DIFFUSE, (1.25 * cf_flicker, 0.58 * cf_flicker, 0.15 * cf_flicker, 1.0))
+
+    draw_skybox(scene["tex_skybox"], cx, cy, cz)
+    draw_floor(scene["tex_snow"], scene["mw"], scene["mh"])
+    draw_maze_optimized(scene["chunks"], (cx, cy, cz), max_dist=50.0)
+    draw_exit(scene["maze"], scene["mw"], scene["mh"], cam_pos=(cx, cy, cz), now_ms=now_ms)
+    draw_campfires([cf_pos], cam_pos=(cx, cy, cz), now_ms=now_ms)
+
+    jack_x = -1.0 + math.sin(t_s * 0.40) * 0.32
+    jack_z = -4.6 + math.cos(t_s * 0.28) * 0.30
+    jdist = math.hypot(cx - jack_x, cz - jack_z)
+    draw_jack_shadow(jack_x, jack_z, jdist, 0.65, now_ms=now_ms)
+    draw_jack_billboard(scene["tex_jack"], jack_x, jack_z, cx, cz, jdist, 0.65, now_ms, is_fake=False)
+    draw_particles(cx, cz, 0.016, blizzard_intensity=(0.35 if mode == "END" else 0.18))
+
+    glDisable(GL_LIGHT2)
+    glMatrixMode(GL_PROJECTION); glPopMatrix()
+    glMatrixMode(GL_MODELVIEW); glPopMatrix()
+
 
 def cleanup_screen_texture():
-    global _gl_screen_tex_id
+    global _gl_screen_tex_id, _menu_3d_cache
     if _gl_screen_tex_id is not None:
         try:
             glDeleteTextures([_gl_screen_tex_id])
         except Exception:
             pass
         _gl_screen_tex_id = None
+    if _menu_3d_cache is not None:
+        for ch in _menu_3d_cache.get("chunks", []):
+            try:
+                glDeleteLists(ch["dlist"], 1)
+            except Exception:
+                pass
+        for key in ("tex_hedge", "tex_snow", "tex_skybox"):
+            tid = _menu_3d_cache.get(key)
+            if tid:
+                try:
+                    glDeleteTextures([tid])
+                except Exception:
+                    pass
+        cleanup_floor_display_list()
+        _menu_3d_cache = None
 
 
-def render_surface_to_opengl(surf):
+def render_surface_to_opengl(surf, clear_bg=True):
     """Renderiza uma Surface Pygame 2D diretamente no viewport OpenGL via projeção ortográfica."""
     global _gl_screen_tex_id
     W, H = DISPLAY_SIZE
@@ -536,14 +1062,17 @@ def render_surface_to_opengl(surf):
     glBindTexture(GL_TEXTURE_2D, _gl_screen_tex_id)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, raw)
 
-    glClearColor(0.0, 0.0, 0.0, 1.0)
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+    if clear_bg:
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
     glOrtho(0, W, 0, H, -1, 1)
     glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
     glDisable(GL_LIGHTING); glDisable(GL_FOG); glDisable(GL_DEPTH_TEST)
     glEnable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glBindTexture(GL_TEXTURE_2D, _gl_screen_tex_id)
     glColor4f(1.0, 1.0, 1.0, 1.0)
     glBegin(GL_QUADS)
@@ -560,182 +1089,220 @@ def render_surface_to_opengl(surf):
 
 
 def run_menu(screen, font, title_font):
+    W, H = DISPLAY_SIZE
     clock = pygame.time.Clock()
-    canvas = pygame.Surface(DISPLAY_SIZE)
-    snowflakes = [[random.randint(0, DISPLAY_SIZE[0]), random.randint(0, DISPLAY_SIZE[1])] for _ in range(150)]
+    canvas = pygame.Surface(DISPLAY_SIZE, pygame.SRCALPHA)
     _fade_result = None
     _fade_alpha = 0
+    selected = 0
+
+    try:
+        menu_font = pygame.font.SysFont("arial", 23)
+        sub_font = pygame.font.SysFont("arial", 19)
+    except Exception:
+        menu_font = font
+        sub_font = font
+
+    btn_w, btn_h = 460, 42
+    btn_rects = [pygame.Rect(W // 2 - btn_w // 2, H // 2 - 10 + i * 52, btn_w, btn_h) for i in range(4)]
+
+    def _activate(idx):
+        nonlocal _fade_result
+        if idx == 0:
+            _fade_result = "GAME"
+        elif idx == 1:
+            di = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
+            _gs.difficulty = _gs.DIFFICULTIES[(di + 1) % len(_gs.DIFFICULTIES)]
+            _gs.save_save_data()
+        elif idx == 2:
+            _fade_result = "SETTINGS"
+        elif idx == 3:
+            return "QUIT"
+        return None
 
     while True:
+        now_ms = pygame.time.get_ticks()
         dt = clock.tick(60) / 1000.0
         dt_step = min(dt, 0.1) * 60.0
         if _fade_result and _fade_alpha >= 255:
             return _fade_result
 
         for event in pygame.event.get():
-            if event.type == QUIT: return "QUIT"
-            if event.type == KEYDOWN and not _fade_result:
-                if event.key == K_RETURN: _fade_result = "GAME"
-                if event.key == K_ESCAPE: return "QUIT"
-                if event.key == K_s: _fade_result = "SETTINGS"
-                if event.key in (K_d, K_TAB):
-                    idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                    _gs.difficulty = _gs.DIFFICULTIES[(idx + 1) % len(_gs.DIFFICULTIES)]
+            if event.type == QUIT:
+                return "QUIT"
+            if _fade_result:
+                continue
+            if event.type == MOUSEMOTION:
+                mx, my = event.pos
+                for i, r in enumerate(btn_rects):
+                    if r.collidepoint(mx, my):
+                        selected = i
+                        break
+            elif event.type == MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                for i, r in enumerate(btn_rects):
+                    if r.collidepoint(mx, my):
+                        selected = i
+                        res = _activate(i)
+                        if res == "QUIT":
+                            return "QUIT"
+                        break
+            elif event.type == KEYDOWN:
+                if event.key == K_ESCAPE:
+                    return "QUIT"
+                elif event.key == K_UP:
+                    selected = (selected - 1) % 4
+                elif event.key == K_DOWN:
+                    selected = (selected + 1) % 4
+                elif event.key == K_RETURN:
+                    res = _activate(selected)
+                    if res == "QUIT":
+                        return "QUIT"
+                elif event.key == K_LEFT and selected == 1:
+                    di = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
+                    _gs.difficulty = _gs.DIFFICULTIES[(di - 1) % len(_gs.DIFFICULTIES)]
                     _gs.save_save_data()
-                    
-        canvas.fill((5, 5, 8)) 
-        
-        for flake in snowflakes:
-            flake[1] += random.randint(1, 4) * dt_step
-            if flake[1] > DISPLAY_SIZE[1]:
-                flake[1] = 0
-                flake[0] = random.randint(0, DISPLAY_SIZE[0])
-            pygame.draw.circle(canvas, (220, 220, 255), (int(flake[0]), int(flake[1])), 2)
-        
-        title_text = title_font.render("THE SHINING MAZE", True, (150, 10, 10))
-        title_rect = title_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 - 110))
-        canvas.blit(title_text, title_rect)
-        
-        if (pygame.time.get_ticks() // 600) % 2 == 0:
-            start_text = font.render("> Pressione [ENTER] para Entrar <", True, (255, 255, 255))
-            start_rect = start_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 35))
-            canvas.blit(start_text, start_rect)
-        
-        diff_info = _gs.DIFFICULTY_PRESETS.get(_gs.difficulty, {})
-        diff_text = font.render(f"Dificuldade: {diff_info.get('label', _gs.difficulty)} ({diff_info.get('desc', '')})  [D]", True, (200, 185, 100))
-        diff_rect = diff_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 85))
-        canvas.blit(diff_text, diff_rect)
+                elif event.key == K_RIGHT and selected == 1:
+                    _activate(1)
+                elif event.key in (K_d, K_TAB):
+                    _activate(1)
+                elif event.key == K_s:
+                    _fade_result = "SETTINGS"
 
-        # Estatísticas e Recordes salvos (save_data.json)
+        draw_menu_background_3d(now_ms, mode="MENU")
+        canvas.fill((0, 0, 0, 0))
+
+        # Vinheta sutil + card chanfrado central sobre a cena 3D
+        panel_rect = pygame.Rect(W // 2 - 340, H // 2 - 220, 680, 500)
+        _draw_chamfered_pygame(canvas, panel_rect, 14, (6, 8, 13, 178), (95, 110, 130, 145), 2)
+
+        shadow_t = title_font.render("THE SHINING MAZE", True, (15, 5, 5))
+        title_text = title_font.render("THE SHINING MAZE", True, (185, 22, 22))
+        canvas.blit(shadow_t, shadow_t.get_rect(center=(W // 2 + 3, H // 2 - 137)))
+        canvas.blit(title_text, title_text.get_rect(center=(W // 2, H // 2 - 140)))
+
+        sub_tag = sub_font.render("OVERLOOK HOTEL  //  EDICAO 3D", True, (175, 185, 200))
+        canvas.blit(sub_tag, sub_tag.get_rect(center=(W // 2, H // 2 - 72)))
+
+        diff_info = _gs.DIFFICULTY_PRESETS.get(_gs.difficulty, {})
+        diff_lbl = f"Dificuldade: {diff_info.get('label', _gs.difficulty)} ({diff_info.get('desc', '')})  [D]"
+        labels = [
+            "Iniciar Jogo  [ENTER]",
+            diff_lbl,
+            "Configuracoes & Acessibilidade  [S]",
+            "Sair  [ESC]",
+        ]
+        for i, (lbl, r) in enumerate(zip(labels, btn_rects)):
+            _draw_menu_button(canvas, r, lbl, menu_font, i == selected, danger=(i == 3))
+
         recs = _gs.save_data.get("records", {}) if _gs.save_data else {}
         diff_best = recs.get("best_times_by_diff", {}).get(_gs.difficulty)
-        best_str = f"{int(diff_best//60)}m {int(diff_best%60):02d}s" if diff_best is not None else "--:--"
+        best_str = f"{int(diff_best // 60)}m {int(diff_best % 60):02d}s" if diff_best is not None else "--:--"
         total_wins = _gs.save_data.get("progress", {}).get("total_wins", 0) if _gs.save_data else 0
-        rec_text = font.render(f"Melhor Tempo [{_gs.difficulty}]: {best_str}   |   Fugas Concluidas: {total_wins}", True, (120, 160, 175))
-        rec_rect = rec_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 125))
-        canvas.blit(rec_text, rec_rect)
+        rec_text = sub_font.render(f"Melhor Tempo [{_gs.difficulty}]: {best_str}   |   Fugas Concluidas: {total_wins}",
+                                   True, (130, 195, 215))
+        canvas.blit(rec_text, rec_text.get_rect(center=(W // 2, H // 2 + 225)))
 
-        inst_text = font.render("Use fones (Audio 3D) | [F] Lanterna | WASD Mover | [S] Configuracoes", True, (130, 130, 130))
-        inst_rect = inst_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1] - 40))
-        canvas.blit(inst_text, inst_rect)
-        
+        inst_text = sub_font.render("Mouse ou Setas  |  [F] Lanterna (apague para se esconder)  |  [M] Minimapa",
+                                    True, (175, 182, 192))
+        canvas.blit(inst_text, inst_text.get_rect(center=(W // 2, H - 30)))
+
         if _fade_result:
             _fade_alpha = min(255, _fade_alpha + int(round(17 * dt_step)))
-            _fade_surf = pygame.Surface(DISPLAY_SIZE)
-            _fade_surf.fill((0, 0, 0))
-            _fade_surf.set_alpha(_fade_alpha)
-            canvas.blit(_fade_surf, (0, 0))
+            fade_s = pygame.Surface(DISPLAY_SIZE, pygame.SRCALPHA)
+            fade_s.fill((0, 0, 0, _fade_alpha))
+            canvas.blit(fade_s, (0, 0))
 
-        render_surface_to_opengl(canvas)
+        render_surface_to_opengl(canvas, clear_bg=False)
 
 
 def run_settings_screen(screen, font, title_font, is_pause=False):
+    W, H = DISPLAY_SIZE
     clock = pygame.time.Clock()
-    canvas = pygame.Surface(DISPLAY_SIZE)
+    canvas = pygame.Surface(DISPLAY_SIZE, pygame.SRCALPHA)
     vol = _gs.master_volume
     sens = _gs.mouse_sensitivity * 1000.0
     selected = 0
     num_items = 9
 
     try:
-        opt_font = pygame.font.SysFont("arial", 25)
-        hint_font = pygame.font.SysFont("arial", 20)
+        opt_font = pygame.font.SysFont("arial", 22)
+        hint_font = pygame.font.SysFont("arial", 19)
+        head_font = pygame.font.SysFont("impact", 54)
     except Exception:
         opt_font = font
         hint_font = font
+        head_font = title_font
+
+    item_rects = [pygame.Rect(W // 2 - 310, 152 + i * 46 - 18, 620, 38) for i in range(num_items)]
+
+    def _finish():
+        _gs.master_volume = vol
+        _gs.mouse_sensitivity = sens / 1000.0
+        _gs.save_save_data()
+        return "GAME" if is_pause else "MENU"
 
     while True:
+        now_ms = pygame.time.get_ticks()
         clock.tick(60)
         for event in pygame.event.get():
-            if event.type == QUIT: return "QUIT"
-            if event.type == KEYDOWN:
+            if event.type == QUIT:
+                return "QUIT"
+            if event.type == MOUSEMOTION:
+                mx, my = event.pos
+                for i, r in enumerate(item_rects):
+                    if r.collidepoint(mx, my):
+                        selected = i
+                        break
+            elif event.type == MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                for i, r in enumerate(item_rects):
+                    if r.collidepoint(mx, my):
+                        selected = i
+                        delta = -1 if (i in (0, 1, 2, 3) and mx < r.centerx) else 1
+                        vol, sens, exit_flag = _apply_setting_change(i, delta, vol, sens)
+                        if exit_flag:
+                            return _finish()
+                        break
+            elif event.type == KEYDOWN:
                 if event.key == K_ESCAPE:
-                    _gs.master_volume = vol
-                    _gs.mouse_sensitivity = sens / 1000.0
-                    _gs.save_save_data()
-                    return "GAME" if is_pause else "MENU"
-                if event.key in (K_RETURN, K_SPACE):
-                    if selected == 8:
-                        _gs.master_volume = vol
-                        _gs.mouse_sensitivity = sens / 1000.0
-                        _gs.save_save_data()
-                        return "GAME" if is_pause else "MENU"
-                    elif selected == 2:
-                        idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                        _gs.difficulty = _gs.DIFFICULTIES[(idx + 1) % len(_gs.DIFFICULTIES)]
-                    elif selected == 4:
-                        _gs.head_bobbing = not _gs.head_bobbing
-                    elif selected == 5:
-                        _gs.camera_shake = not _gs.camera_shake
-                    elif selected == 6:
-                        _gs.photosensitivity_mode = not _gs.photosensitivity_mode
-                    elif selected == 7:
-                        _gs.invert_mouse_y = not _gs.invert_mouse_y
-                if event.key == K_UP:
+                    return _finish()
+                elif event.key == K_UP:
                     selected = (selected - 1) % num_items
-                if event.key == K_DOWN:
+                elif event.key == K_DOWN:
                     selected = (selected + 1) % num_items
-                if event.key == K_LEFT:
-                    if selected == 0: vol = max(0.0, vol - 0.1)
-                    elif selected == 1: sens = max(1.0, sens - 1.0)
-                    elif selected == 2:
-                        idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                        _gs.difficulty = _gs.DIFFICULTIES[(idx - 1) % len(_gs.DIFFICULTIES)]
-                    elif selected == 3:
-                        _gs.fov = max(60.0, _gs.fov - 5.0)
-                    elif selected == 4: _gs.head_bobbing = not _gs.head_bobbing
-                    elif selected == 5: _gs.camera_shake = not _gs.camera_shake
-                    elif selected == 6: _gs.photosensitivity_mode = not _gs.photosensitivity_mode
-                    elif selected == 7: _gs.invert_mouse_y = not _gs.invert_mouse_y
-                if event.key == K_RIGHT:
-                    if selected == 0: vol = min(2.0, vol + 0.1)
-                    elif selected == 1: sens = min(10.0, sens + 1.0)
-                    elif selected == 2:
-                        idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                        _gs.difficulty = _gs.DIFFICULTIES[(idx + 1) % len(_gs.DIFFICULTIES)]
-                    elif selected == 3:
-                        _gs.fov = min(95.0, _gs.fov + 5.0)
-                    elif selected == 4: _gs.head_bobbing = not _gs.head_bobbing
-                    elif selected == 5: _gs.camera_shake = not _gs.camera_shake
-                    elif selected == 6: _gs.photosensitivity_mode = not _gs.photosensitivity_mode
-                    elif selected == 7: _gs.invert_mouse_y = not _gs.invert_mouse_y
+                elif event.key == K_LEFT:
+                    vol, sens, _ = _apply_setting_change(selected, -1, vol, sens)
+                elif event.key == K_RIGHT:
+                    vol, sens, _ = _apply_setting_change(selected, 1, vol, sens)
+                elif event.key in (K_RETURN, K_SPACE):
+                    vol, sens, exit_flag = _apply_setting_change(selected, 1, vol, sens)
+                    if exit_flag:
+                        return _finish()
 
-        canvas.fill((10, 10, 16))
-        title = "CONFIGURACOES & ACESSIBILIDADE"
-        t = title_font.render(title, True, (170, 170, 180))
-        canvas.blit(t, t.get_rect(center=(DISPLAY_SIZE[0]//2, 75)))
+        draw_menu_background_3d(now_ms, mode="SETTINGS")
+        canvas.fill((0, 0, 0, 0))
 
-        diff_data = _gs.DIFFICULTY_PRESETS.get(_gs.difficulty, {})
-        diff_str = f"{diff_data.get('label', _gs.difficulty)} ({diff_data.get('desc', '')})"
+        panel_rect = pygame.Rect(W // 2 - 350, 42, 700, H - 84)
+        _draw_chamfered_pygame(canvas, panel_rect, 12, (6, 8, 13, 210), (95, 110, 130, 165), 2)
 
-        items = [
-            f"Volume Geral: {int(vol * 100)}%",
-            f"Sensibilidade Mouse: {int(sens)}",
-            f"Dificuldade: {diff_str}",
-            f"Campo de Visao (FOV): {int(_gs.fov)}°",
-            f"Balanco de Camera (Bobbing): {'Ligado' if _gs.head_bobbing else 'Desligado'}",
-            f"Tremores de Camera (Shake): {'Ligado' if _gs.camera_shake else 'Desligado'}",
-            f"Fotosensibilidade (Sem Flashes): {'Ligado' if _gs.photosensitivity_mode else 'Desligado'}",
-            f"Inverter Eixo Y: {'Sim' if _gs.invert_mouse_y else 'Nao'}",
-            "Voltar ao Menu Principal" if not is_pause else "Retomar Jogo"
-        ]
+        t = head_font.render("CONFIGURACOES & ACESSIBILIDADE", True, (215, 222, 230))
+        canvas.blit(t, t.get_rect(center=(W // 2, 92)))
 
-        start_y = 150
-        spacing = 46
-        for i, text in enumerate(items):
-            color = (255, 255, 80) if i == selected else (175, 175, 175)
-            prefix = "> " if i == selected else "  "
-            surf = opt_font.render(prefix + text, True, color)
-            canvas.blit(surf, surf.get_rect(center=(DISPLAY_SIZE[0]//2, start_y + i * spacing)))
+        back_lbl = "Voltar ao Menu Principal" if not is_pause else "Retomar Jogo"
+        items = _format_settings_items(vol, sens, back_lbl)
+        for i, (text, r) in enumerate(zip(items, item_rects)):
+            _draw_menu_button(canvas, r, text, opt_font, i == selected)
 
-        hint = hint_font.render("[ESQ/DIR ou ENTER] Ajustar  |  [SETAS CIMA/BAIXO] Navegar  |  ESC Voltar",
-                                True, (120, 120, 120))
-        canvas.blit(hint, hint.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1] - 40)))
+        hint = hint_font.render("[CLIQUE ESQ/DIR ou SETAS] Ajustar  |  [ESC] Salvar e Voltar",
+                                True, (160, 168, 180))
+        canvas.blit(hint, hint.get_rect(center=(W // 2, H - 28)))
 
-        render_surface_to_opengl(canvas)
+        render_surface_to_opengl(canvas, clear_bg=False)
 
 
 def run_end_screen(screen, font, title_font, stats=None):
+    W, H = DISPLAY_SIZE
     new_recs = {}
     if stats:
         run_time, dist, jumpscares, peak_anx, batts = stats
@@ -746,80 +1313,174 @@ def run_end_screen(screen, font, title_font, stats=None):
     cc = _gs.completion_count
 
     madness_lines = [
-        "Pressione [ENTER] para Voltar ao Menu",
-        "Por que voltar? Ele ainda está lá...",
-        "Você sente que está sendo observado.",
-        "Não há saída real. Nunca houve.",
+        "Selecione uma opcao para continuar",
+        "Por que voltar? Ele ainda esta la...",
+        "Voce sente que esta sendo observado.",
+        "Nao ha saida real. Nunca houve.",
         "REDRUM. REDRUM. REDRUM.",
-        "Você não consegue parar, consegue?",
-        "ELE SABE QUE VOCÊ ESTÁ VOLTANDO.",
-        "AQUI NÃO HÁ ESCAPE. SÓ O LABIRINTO.",
+        "Voce nao consegue parar, consegue?",
+        "ELE SABE QUE VOCE ESTA VOLTANDO.",
+        "AQUI NAO HA ESCAPE. SO O LABIRINTO.",
     ]
     sub_msg = madness_lines[min(cc - 1, len(madness_lines) - 1)]
-    bg_color = (min(20 + cc * 20, 200), max(8 - cc, 2), max(10 - cc, 2))
+
+    try:
+        stat_font = pygame.font.SysFont("arial", 22)
+        btn_font = pygame.font.SysFont("arial", 23)
+    except Exception:
+        stat_font = font
+        btn_font = font
+
+    btn_rects = [
+        pygame.Rect(W // 2 - 260, H // 2 + 185, 245, 44),
+        pygame.Rect(W // 2 + 15, H // 2 + 185, 245, 44),
+    ]
+    selected = 0
 
     clock = pygame.time.Clock()
-    canvas = pygame.Surface(DISPLAY_SIZE)
+    canvas = pygame.Surface(DISPLAY_SIZE, pygame.SRCALPHA)
     _fade_result = None
     _fade_alpha = 0
     while True:
+        now_ms = pygame.time.get_ticks()
         dt = clock.tick(60) / 1000.0
         dt_step = min(dt, 0.1) * 60.0
         if _fade_result and _fade_alpha >= 255:
             return _fade_result
 
         for event in pygame.event.get():
-            if event.type == QUIT: return "QUIT"
-            if event.type == KEYDOWN and not _fade_result:
-                if event.key == K_RETURN: _fade_result = "MENU"
-                if event.key == K_ESCAPE: return "QUIT"
+            if event.type == QUIT:
+                return "QUIT"
+            if _fade_result:
+                continue
+            if event.type == MOUSEMOTION:
+                mx, my = event.pos
+                for i, r in enumerate(btn_rects):
+                    if r.collidepoint(mx, my):
+                        selected = i
+                        break
+            elif event.type == MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+                if btn_rects[0].collidepoint(mx, my):
+                    _fade_result = "MENU"
+                elif btn_rects[1].collidepoint(mx, my):
+                    return "QUIT"
+            elif event.type == KEYDOWN:
+                if event.key == K_ESCAPE:
+                    return "QUIT"
+                elif event.key in (K_LEFT, K_UP):
+                    selected = (selected - 1) % 2
+                elif event.key in (K_RIGHT, K_DOWN):
+                    selected = (selected + 1) % 2
+                elif event.key == K_RETURN:
+                    if selected == 0:
+                        _fade_result = "MENU"
+                    else:
+                        return "QUIT"
 
-        canvas.fill(bg_color)
+        draw_menu_background_3d(now_ms, mode="END")
+        canvas.fill((0, 0, 0, 0))
 
-        if cc >= 3:
-            ox = random.randint(-cc, cc)
-            oy = random.randint(-cc, cc)
-        else:
-            ox, oy = 0, 0
+        card_rect = pygame.Rect(W // 2 - 330, H // 2 - 235, 660, 495)
+        border_c = (185, 45, 45, 195) if cc >= 2 else (110, 130, 150, 180)
+        _draw_chamfered_pygame(canvas, card_rect, 14, (8, 8, 12, 208), border_c, 2)
 
-        title_color = (min(20 + cc * 30, 255), max(40 - cc * 5, 0), max(60 - cc * 8, 0))
-        title_text = title_font.render("VOCÊ ESCAPOU", True, title_color)
-        title_rect = title_text.get_rect(center=(DISPLAY_SIZE[0]//2 + ox, DISPLAY_SIZE[1]//2 - 60 + oy))
-        canvas.blit(title_text, title_rect)
+        ox = random.randint(-cc, cc) if cc >= 3 else 0
+        oy = random.randint(-cc, cc) if cc >= 3 else 0
 
-        count_color = (180, 20, 20) if cc >= 2 else (100, 100, 100)
-        count_text = font.render(f"Vezes que escapou: {cc}", True, count_color)
-        count_rect = count_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 10))
-        canvas.blit(count_text, count_rect)
+        title_color = (min(170 + cc * 20, 255), max(75 - cc * 10, 20), max(75 - cc * 10, 20))
+        title_text = title_font.render("VOCE ESCAPOU", True, title_color)
+        canvas.blit(title_text, title_text.get_rect(center=(W // 2 + ox, H // 2 - 155 + oy)))
+
+        count_color = (225, 65, 65) if cc >= 2 else (175, 185, 200)
+        count_text = stat_font.render(f"Fugas Concluidas: {cc}", True, count_color)
+        canvas.blit(count_text, count_text.get_rect(center=(W // 2, H // 2 - 88)))
 
         if stats:
             run_time, dist, jumpscares, peak_anx, batts = stats
-            s0 = font.render(f"Tempo: {int(run_time//60)}m {int(run_time%60):02d}s", True, (130, 130, 130))
-            s1 = font.render(f"Distância: {dist:.1f} m", True, (130, 130, 130))
-            s2 = font.render(f"Jumpscares: {jumpscares}", True, (130, 130, 130))
-            s3 = font.render(f"Pico de Ansiedade: {int(peak_anx*100)}%", True, (130, 130, 130))
-            s4 = font.render(f"Baterias Coletadas: {batts}", True, (80, 220, 150))
-            canvas.blit(s0, s0.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 40)))
-            canvas.blit(s1, s1.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 65)))
-            canvas.blit(s2, s2.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 90)))
-            canvas.blit(s3, s3.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 115)))
-            canvas.blit(s4, s4.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 140)))
+            stat_rows = [
+                (f"Tempo: {int(run_time // 60)}m {int(run_time % 60):02d}s", (205, 210, 220)),
+                (f"Distancia Percorrida: {dist:.1f} m", (205, 210, 220)),
+                (f"Jumpscares Sofridos: {jumpscares}", (205, 210, 220)),
+                (f"Pico de Ansiedade: {int(peak_anx * 100)}%", (205, 210, 220)),
+                (f"Baterias Coletadas: {batts}", (95, 235, 160)),
+            ]
+            for idx, (s_lbl, scol) in enumerate(stat_rows):
+                s_surf = stat_font.render(s_lbl, True, scol)
+                canvas.blit(s_surf, s_surf.get_rect(center=(W // 2, H // 2 - 42 + idx * 30)))
             if new_recs.get("best_time") or new_recs.get("diff_best_time"):
-                rec_alert = font.render("★ NOVO RECORDE DE TEMPO! ★", True, (255, 220, 70))
-                canvas.blit(rec_alert, rec_alert.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 170)))
+                rec_alert = stat_font.render("* NOVO RECORDE DE TEMPO! *", True, (255, 220, 75))
+                canvas.blit(rec_alert, rec_alert.get_rect(center=(W // 2, H // 2 + 114)))
 
-        start_text = font.render(sub_msg, True, (200, 200, 200))
-        start_rect = start_text.get_rect(center=(DISPLAY_SIZE[0]//2, DISPLAY_SIZE[1]//2 + 210))
-        canvas.blit(start_text, start_rect)
+        sub_surf = stat_font.render(sub_msg, True, (210, 210, 220) if cc < 3 else (225, 90, 90))
+        canvas.blit(sub_surf, sub_surf.get_rect(center=(W // 2, H // 2 + 152)))
+
+        _draw_menu_button(canvas, btn_rects[0], "Voltar ao Menu  [ENTER]", btn_font, selected == 0)
+        _draw_menu_button(canvas, btn_rects[1], "Sair  [ESC]", btn_font, selected == 1, danger=True)
 
         if _fade_result:
             _fade_alpha = min(255, _fade_alpha + int(round(17 * dt_step)))
-            _fade_surf = pygame.Surface(DISPLAY_SIZE)
-            _fade_surf.fill((0, 0, 0))
-            _fade_surf.set_alpha(_fade_alpha)
-            canvas.blit(_fade_surf, (0, 0))
+            fade_s = pygame.Surface(DISPLAY_SIZE, pygame.SRCALPHA)
+            fade_s.fill((0, 0, 0, _fade_alpha))
+            canvas.blit(fade_s, (0, 0))
 
-        render_surface_to_opengl(canvas)
+        render_surface_to_opengl(canvas, clear_bg=False)
+
+
+def _update_nearest_campfire_light(px, pz, campfires, t_s, photosensitivity):
+    """Ativa a luz pontual GL_LIGHT2 na fogueira mais proxima (< 18m)."""
+    nearest_camp = None
+    nearest_camp_d = 18.0
+    for fx, fz in campfires:
+        d_cf = math.hypot(px - fx, pz - fz)
+        if d_cf < nearest_camp_d:
+            nearest_camp_d = d_cf
+            nearest_camp = (fx, fz)
+    if nearest_camp is not None:
+        cf_flicker = 1.0 if photosensitivity else (
+            0.88 + 0.12 * math.sin(t_s * 13.7) + 0.06 * math.cos(t_s * 23.1)
+        )
+        glEnable(GL_LIGHT2)
+        glLightfv(GL_LIGHT2, GL_POSITION, (nearest_camp[0], -0.35, nearest_camp[1], 1.0))
+        glLightfv(GL_LIGHT2, GL_DIFFUSE, (1.20 * cf_flicker, 0.56 * cf_flicker, 0.14 * cf_flicker, 1.0))
+    else:
+        glDisable(GL_LIGHT2)
+
+
+def _draw_wall_texts(wall_text_data, wall_text_textures, madness, t_s):
+    """Renderiza inscricoes nas paredes conforme o nivel de loucura."""
+    if not wall_text_data:
+        return
+    WALL_H = 1.35
+    TEXT_W = 0.82
+    TEXT_H = 0.28
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_POLYGON_BIT)
+    glDisable(GL_LIGHTING)
+    glEnable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glEnable(GL_POLYGON_OFFSET_FILL)
+    glPolygonOffset(-1.0, -1.0)
+    for (wx, wz, ndx, ndz, label, min_mad) in wall_text_data:
+        if madness < min_mad:
+            continue
+        fade = min(1.0, (madness - min_mad) / 0.12)
+        pulse = 0.7 + 0.3 * abs(math.sin(t_s * 1.8 + wx))
+        alpha = fade * pulse
+        tid, umax, vmax = wall_text_textures[label]
+        glBindTexture(GL_TEXTURE_2D, tid)
+        glColor4f(1.0, 0.08, 0.08, alpha)
+        wy = WALL_H
+        rx = -ndz
+        rz = ndx
+        glBegin(GL_QUADS)
+        glTexCoord2f(0.0, vmax);  glVertex3f(wx - rx * TEXT_W, wy - TEXT_H, wz - rz * TEXT_W)
+        glTexCoord2f(umax, vmax); glVertex3f(wx + rx * TEXT_W, wy - TEXT_H, wz + rz * TEXT_W)
+        glTexCoord2f(umax, 0.0);  glVertex3f(wx + rx * TEXT_W, wy + TEXT_H, wz + rz * TEXT_W)
+        glTexCoord2f(0.0, 0.0);   glVertex3f(wx - rx * TEXT_W, wy + TEXT_H, wz - rz * TEXT_W)
+        glEnd()
+    glPopAttrib()
+
 
 def run_game():
     global maze_map, MAP_WIDTH, MAP_HEIGHT
@@ -870,8 +1531,8 @@ def run_game():
     exit_pos = (0.0, 0.0)
     exit_grid = (MAP_WIDTH - 2, MAP_HEIGHT - 2)  # fallback
     
-    tex_corpse = load_texture(tex("corpse.png"))
-    tex_jack   = load_texture(tex("jack.png"))
+    tex_corpse = None
+    tex_jack   = None
 
     fake_exit_pos = None
     fake_exit_cell = None
@@ -894,10 +1555,25 @@ def run_game():
 
     EXIT_REACH = BLOCK_SIZE * 1.5  # Distância para detectar saída
     
-    trap_tex_info = create_text_texture("VOCÊ NÃO PODE SAIR", color=(200, 0, 0), font_size=80)
     trap_text_timer_ms = 0
-    interact_tex_info = create_text_texture("Pressione [E] para vasculhar", font_size=40)
-    battery_toast_tex = create_text_texture("+45% BATERIA RECARREGADA", color=(80, 255, 160), font_size=28)
+    prompt_e_textures = {
+        "key": create_ui_label_texture("E", color=(250, 224, 150), font_size=15, bold=True),
+        "title": create_ui_label_texture("VASCULHAR SOBREVIVENTE", color=(240, 244, 250), font_size=14, bold=True),
+        "sub": create_ui_label_texture("Suprimentos  •  Kit Térmico  •  Mapa", color=(158, 176, 198), font_size=12, bold=False),
+    }
+    trap_banner_textures = {
+        "sub": create_ui_label_texture("ARMADILHA DO OVERLOOK", color=(240, 175, 145), font_size=12, bold=True),
+        "title": create_ui_label_texture("VOCÊ NÃO PODE SAIR", color=(235, 42, 42), font_size=30, bold=False, font_name="impact"),
+    }
+    toast_textures = {
+        "BATTERY": create_ui_label_texture("+45% BATERIA RECARREGADA", color=(140, 255, 190), font_size=12, bold=True),
+        "CORPSE_KIT": create_ui_label_texture("+75% BATERIA  •  KIT TÉRMICO", color=(140, 255, 190), font_size=12, bold=True),
+        "CORPSE_MAP": create_ui_label_texture("MAPA REVELADO  •  +50% BATERIA", color=(150, 225, 255), font_size=12, bold=True),
+        "CORPSE_TRAP": create_ui_label_texture("ARMADILHA! +30% BATERIA E MAPA", color=(255, 200, 120), font_size=11, bold=True),
+    }
+    campfire_badge_tex = create_ui_label_texture("ZONA SEGURA  •  AQUECENDO", color=(255, 212, 150), font_size=12, bold=True)
+    active_toast_key = "BATTERY"
+    active_toast_style = "BATTERY"
     
     fake_jacks = []
     next_fake_jack_ms = pygame.time.get_ticks() + 15000
@@ -907,7 +1583,7 @@ def run_game():
     for cx, cy in corpse_cells:
         wx = (cx - MAP_WIDTH/2) * BLOCK_SIZE
         wz = (cy - MAP_HEIGHT/2) * BLOCK_SIZE
-        corpses.append({'pos': (wx, wz), 'searched': False})
+        corpses.append({'pos': (wx, wz), 'cell': (cx, cy), 'searched': False})
         
         # Gerar rastro de sangue saindo do corpo (trilha direcional)
         bcx, bcy = cx, cy
@@ -1019,14 +1695,19 @@ def run_game():
         battery_snd = None
 
     # ---- Jack Perseguidor ----
-    # Começa no canto oposto ao jogador
-    jack_pos = (MAP_WIDTH - 3, MAP_HEIGHT - 3)
-    # Garante que não está em parede
-    while maze_map[jack_pos[1]][jack_pos[0]] == 1 and jack_pos[0] > 1:
-        jack_pos = (jack_pos[0] - 1, jack_pos[1])
-    base_jack_interval = diff_cfg.get("jack_interval", 320) * 10
-    jack_move_interval = max(1000, base_jack_interval - int(madness * 1500))  # ms entre movimentos
-    next_jack_move_ms  = pygame.time.get_ticks() + 10000   # 10s de graça
+    # Comeca em uma celula aberta distante do jogador e da saida
+    jack_pos = find_distant_open_cell(maze_map, MAP_WIDTH, MAP_HEIGHT, (1, 1), avoid_pos=exit_grid)
+    jack_target_cell = jack_pos
+    jack_wx = (jack_pos[0] - MAP_WIDTH / 2.0) * BLOCK_SIZE
+    jack_wz = (jack_pos[1] - MAP_HEIGHT / 2.0) * BLOCK_SIZE
+    jack_move_yaw = math.atan2((1 - MAP_HEIGHT / 2.0) * BLOCK_SIZE - jack_wz,
+                               (1 - MAP_WIDTH / 2.0) * BLOCK_SIZE - jack_wx)
+    base_jack_speed = {"FACIL": 2.3, "NORMAL": 3.0, "DIFICIL": 3.8}.get(diff_key, 3.0)
+    jack_speed = base_jack_speed * (1.0 + 0.25 * madness)
+    next_jack_move_ms  = pygame.time.get_ticks() + 10000   # 10s de graca
+    jack_last_known_cell = None
+    jack_patrol_goal = None
+    jack_alerted = False
     jack_ch = None
     try:
         jack_snd = pygame.mixer.Sound(snd("heartbeat.wav"))
@@ -1061,21 +1742,7 @@ def run_game():
     except: footstep_snd = None
     last_step_bob = 0.0
 
-    # ---- Jumpscare (pré-carrega texturas na GPU para evitar memory leak) ----
-    jumpscare_textures = []
-    for fname in ["jumpscare_jack.png", "jumpscare_twins.png", "jumpscare_bug.png"]:
-        try:
-            surf = pygame.image.load(tex(fname)).convert_alpha()
-            w, h = surf.get_size()
-            raw = pygame.image.tostring(surf, "RGBA", False)
-            tid = glGenTextures(1)
-            glBindTexture(GL_TEXTURE_2D, tid)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, raw)
-            jumpscare_textures.append(tid)
-        except Exception as e:
-            print(f"Jumpscare img {fname}: {e}")
+    # ---- Jumpscares 3D procedurais (sem PNGs 2D planos) ----
 
     # Carrega os sons de susto
     try:
@@ -1092,44 +1759,58 @@ def run_game():
         print(f"scare snd: {e}")
         scare_snd = None
 
-    # ---- Partículas de Inseto (quadradinhos marrons subindo pelo personagem) ----
-    BUG_DUR_MS       = 4500    # duração total da animação
-    BUG_PART_COUNT   = 38      # número de partículas
-    bug_active       = False
-    bug_start_ms     = 0
-    bug_particles    = []      # lista de dicts de partícula
-    # Frequência: bem espaçada, fica menor com mais completações
-    next_bug_ms = pygame.time.get_ticks() + random.randint(120000, 240000)
+    # ---- Veios de Frio / Delirio nas Bordas da Tela ----
+    FROST_CREEP_DUR_MS   = 4500    # duracao total da animacao
+    frost_creep_active   = False
+    frost_creep_start_ms = 0
+    frost_veins          = []
+    next_frost_creep_ms  = pygame.time.get_ticks() + random.randint(120000, 240000)
 
-    def spawn_bug_particles():
+    def spawn_frost_veins():
         W, H = DISPLAY_SIZE
-        parts = []
-        for _ in range(BUG_PART_COUNT):
-            edge = random.randint(0, 2)   # 0=fundo, 1=esq, 2=dir
-            if edge == 0:
-                sx = random.uniform(W * 0.05, W * 0.95)
-                sy = H + random.uniform(10, 40)
-            elif edge == 1:
-                sx = random.uniform(-30, 10)
-                sy = random.uniform(H * 0.65, H)
+        veins = []
+        edge_bias = [0, 1, 2, 3, 2, 3, 1]
+        for i in range(22):
+            side = random.choice(edge_bias)
+            if side == 0:
+                x, y = random.uniform(0.05 * W, 0.95 * W), 0.0
+                ang = random.uniform(math.pi * 0.25, math.pi * 0.75)
+            elif side == 1:
+                x, y = random.uniform(0.05 * W, 0.95 * W), float(H)
+                ang = random.uniform(-math.pi * 0.75, -math.pi * 0.25)
+            elif side == 2:
+                x, y = 0.0, random.uniform(0.08 * H, 0.95 * H)
+                ang = random.uniform(-math.pi * 0.35, math.pi * 0.35)
             else:
-                sx = random.uniform(W - 10, W + 30)
-                sy = random.uniform(H * 0.65, H)
-            foot_x = W * 0.5 + random.uniform(-70, 70)
-            foot_y = H * 0.87 + random.uniform(-20, 20)
-            face_x = W * 0.5 + random.uniform(-25, 25)
-            face_y = H * 0.12 + random.uniform(-15, 15)
-            parts.append({
-                'sx': sx, 'sy': sy,
-                'fx': foot_x, 'fy': foot_y,
-                'ex': face_x, 'ey': face_y,
-                'size': random.randint(3, 7),
-                'delay': random.uniform(0.0, 0.25),
-                'speed': random.uniform(0.75, 1.3),
-                'wobble': random.uniform(0, math.pi * 2),
-                'brown': random.randint(90, 150),
+                x, y = float(W), random.uniform(0.08 * H, 0.95 * H)
+                ang = random.uniform(math.pi * 0.65, math.pi * 1.35)
+
+            segs = random.randint(6, 10)
+            step_len = random.uniform(16.0, 26.0)
+            pts = [(x, y)]
+            branches = []
+            cur_ang = ang
+            for s in range(segs):
+                cur_ang += random.uniform(-0.42, 0.42)
+                nx = x + math.cos(cur_ang) * step_len
+                ny = y + math.sin(cur_ang) * step_len
+                pts.append((nx, ny))
+                if 1 <= s <= segs - 2 and random.random() < 0.45:
+                    b_ang = cur_ang + random.choice((-1, 1)) * random.uniform(0.45, 0.85)
+                    bx = nx + math.cos(b_ang) * step_len * 0.85
+                    by = ny + math.sin(b_ang) * step_len * 0.85
+                    branches.append(((nx, ny), (bx, by)))
+                x, y = nx, ny
+
+            veins.append({
+                'pts': pts,
+                'branches': branches,
+                'delay': random.uniform(0.0, 0.22),
+                'speed': random.uniform(0.85, 1.35),
+                'width': random.uniform(1.2, 2.3),
+                'blood': (madness > 0.55 or (i % 4 == 0 and anxiety > 0.5)),
             })
-        return parts
+        return veins
 
     # ---- Piscar de Tela (cc >= 3) ----
     blink_active    = False
@@ -1161,9 +1842,8 @@ def run_game():
 
     jumpscare_active   = False
     jumpscare_start_ms = 0
-    # JUMPSCARE_DUR_MS já calculado acima (escala com madness)
-    current_js_tex     = None
-    # Tipo de efeito extra para cada jumpscare (0=normal,1=flash,2=glitch,3=negativo)
+    # JUMPSCARE_DUR_MS ja calculado acima (escala com madness)
+    # Tipo de jumpscare 3D: 0=Jack, 1=Jack Flash, 2=Gemeas Grady, 3=Garra Congelada
     js_effect_type     = 0
 
     # ---- Fôlego e Stamina ----
@@ -1191,6 +1871,7 @@ def run_game():
     next_blizzard_ms = pygame.time.get_ticks() + random.randint(25000, 45000)
     blizzard_end_ms = 0
     hypothermia = 0.0
+    near_campfire = False
 
     # ---- Sangue no Teto ----
     blood_overlay_timer = 0
@@ -1207,10 +1888,19 @@ def run_game():
 
     yaw   = math.pi / 4
     pitch = 0.0
+    light_yaw   = yaw
+    light_pitch = pitch
+    sway_x = 0.0
+    sway_y = 0.0
     move_speed = BASE_SPEED
     mouse_sensitivity = _gs.mouse_sensitivity
     bob_time = 0.0
     minimap_timer_ms = 0
+    visited_cells = {
+        (vx, vy)
+        for vy in range(max(0, 0), min(MAP_HEIGHT, 3))
+        for vx in range(max(0, 0), min(MAP_WIDTH, 3))
+    }
 
     # ---- Pausa ----
     paused = False
@@ -1230,6 +1920,11 @@ def run_game():
     look_x = player_pos[0] + math.cos(yaw)
     look_y = player_pos[1]
     look_z = player_pos[2] + math.sin(yaw)
+    eff = 1.0
+    light_dir = (math.cos(yaw), 0.0, math.sin(yaw))
+    jack_dist = math.hypot(player_pos[0] - jack_wx, player_pos[2] - jack_wz)
+    pause_frozen_ms = pygame.time.get_ticks()
+    t_s = pause_frozen_ms / 1000.0
 
     clock = pygame.time.Clock()
     pygame.mouse.get_rel() 
@@ -1243,13 +1938,29 @@ def run_game():
     # Fila de ecos falsos
     fake_echoes = []
     was_moving = False
+    paused_total_ms = 0
+
+    def _resume_from_pause():
+        nonlocal paused, vol_mult
+        paused = False
+        vol_mult = (1.0 + madness * 1.5) * _gs.master_volume
+        if wind_snd: wind_snd.set_volume(min(1.0, 0.25 * vol_mult))
+        if drip_snd: drip_snd.set_volume(min(1.0, 0.6 * vol_mult))
+        if click_snd: click_snd.set_volume(min(1.0, 0.8 * vol_mult))
+        if battery_snd: battery_snd.set_volume(min(1.0, 0.8 * vol_mult))
+        if grito_snd: grito_snd.set_volume(min(1.0, vol_mult))
+        if scare_snd: scare_snd.set_volume(min(1.0, vol_mult))
+        pygame.mixer.unpause()
+        pygame.mouse.set_visible(False)
+        pygame.event.set_grab(True)
+        pygame.mouse.get_rel()
 
     try:
         while True:
-            dt = clock.tick(60) / 1000.0
-            dt = min(dt, 0.1)
+            raw_dt_ms = clock.tick(60)
+            dt = min(raw_dt_ms / 1000.0, 0.1)
             dt_step = dt * 60.0
-            now_ms = pygame.time.get_ticks()
+            now_ms = pygame.time.get_ticks() - paused_total_ms
             for event in pygame.event.get():
                 if event.type == QUIT: return "QUIT"
                 if event.type == KEYDOWN:
@@ -1263,14 +1974,13 @@ def run_game():
                             pause_in_settings = False
                             _gs.save_save_data()
                         elif paused:
-                            paused = False
-                            pygame.mouse.set_visible(False)
-                            pygame.event.set_grab(True)
-                            pygame.mouse.get_rel()
+                            _resume_from_pause()
                         else:
                             paused = True
+                            pause_frozen_ms = now_ms
                             pause_selected = 0
                             pause_exiting = False
+                            pygame.mixer.pause()
                             pygame.mouse.set_visible(True)
                             pygame.event.set_grab(False)
                     elif event.key == K_e and not paused and not jumpscare_active:
@@ -1280,19 +1990,33 @@ def run_game():
                                 dist = math.dist([player_pos[0], player_pos[2]], [c['pos'][0], c['pos'][1]])
                                 if dist < BLOCK_SIZE * 1.5:
                                     c['searched'] = True
-                                    if random.random() < 0.5:
-                                        # Azar: Jumpscare
+                                    stat_batteries_collected += 1
+                                    battery_toast_timer_ms = now_ms + 3000
+                                    res = resolve_corpse_search(
+                                        maze_map, MAP_WIDTH, MAP_HEIGHT, c['cell'], exit_grid, visited_cells
+                                    )
+                                    battery = min(1.0, battery + res["battery_delta"])
+                                    hypothermia = max(0.0, hypothermia + res["hypo_delta"])
+                                    anxiety = max(0.0, min(1.0, anxiety + res["anxiety_delta"]))
+                                    stamina = min(1.0, stamina + res["stamina_delta"])
+                                    active_toast_key = res["toast_key"]
+                                    active_toast_style = res["toast_style"]
+                                    if res["minimap_ms"] > 0:
+                                        minimap_timer_ms = max(minimap_timer_ms, now_ms + res["minimap_ms"])
+                                    if res["jumpscare"]:
                                         jumpscare_active = True
                                         jumpscare_start_ms = now_ms
-                                        current_js_tex = tex_corpse  # O corpo agarra a tela
-                                        js_effect_type = random.choice([0, 1, 2, 3])
-                                        if grito_snd: grito_snd.play()
-                                        anxiety = 1.0
-                                        battery = 0.0
-                                    else:
-                                        # Sorte: Bateria Cheia e alívio
-                                        battery = 1.0
-                                        anxiety = max(0.0, anxiety - 0.3)
+                                        js_effect_type = 3
+                                        stat_jumpscares += 1
+                                        if grito_snd:
+                                            grito_snd.play()
+                                    elif battery_snd:
+                                        battery_snd.play()
+                                    if res["flicker_ms"] > 0:
+                                        flicker_off_until = max(flicker_off_until, now_ms + res["flicker_ms"])
+                                    if res["alert_jack"]:
+                                        jack_last_known_cell = c['cell']
+                                        jack_alerted = True
                                     break
                     elif event.key == K_f and not paused and not jumpscare_active:
                         flashlight_on = not flashlight_on
@@ -1305,10 +2029,7 @@ def run_game():
                             pause_selected = (pause_selected + 1) % 3
                         elif event.key == K_RETURN:
                             if pause_selected == 0:
-                                paused = False
-                                pygame.mouse.set_visible(False)
-                                pygame.event.set_grab(True)
-                                pygame.mouse.get_rel()
+                                _resume_from_pause()
                             elif pause_selected == 1:
                                 pause_in_settings = True
                                 pause_vol = _gs.master_volume
@@ -1323,73 +2044,65 @@ def run_game():
                         elif event.key == K_DOWN:
                             pause_settings_sel = (pause_settings_sel + 1) % 9
                         elif event.key == K_LEFT:
-                            if pause_settings_sel == 0:
-                                pause_vol = max(0.0, pause_vol - 0.1)
-                                _gs.master_volume = pause_vol
-                            elif pause_settings_sel == 1:
-                                pause_sens = max(1.0, pause_sens - 1.0)
-                                _gs.mouse_sensitivity = pause_sens / 1000.0
-                                mouse_sensitivity = _gs.mouse_sensitivity
-                            elif pause_settings_sel == 2:
-                                idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                                _gs.difficulty = _gs.DIFFICULTIES[(idx - 1) % len(_gs.DIFFICULTIES)]
-                            elif pause_settings_sel == 3:
-                                _gs.fov = max(60.0, _gs.fov - 5.0)
-                                glMatrixMode(GL_PROJECTION); glLoadIdentity()
-                                gluPerspective(_gs.fov, (DISPLAY_SIZE[0] / DISPLAY_SIZE[1]), 0.1, 80.0)
-                                glMatrixMode(GL_MODELVIEW)
-                            elif pause_settings_sel == 4:
-                                _gs.head_bobbing = not _gs.head_bobbing
-                            elif pause_settings_sel == 5:
-                                _gs.camera_shake = not _gs.camera_shake
-                            elif pause_settings_sel == 6:
-                                _gs.photosensitivity_mode = not _gs.photosensitivity_mode
-                            elif pause_settings_sel == 7:
-                                _gs.invert_mouse_y = not _gs.invert_mouse_y
+                            pause_vol, pause_sens, _ = _apply_setting_change(
+                                pause_settings_sel, -1, pause_vol, pause_sens, update_gl_proj=True
+                            )
+                            mouse_sensitivity = _gs.mouse_sensitivity
                         elif event.key == K_RIGHT:
-                            if pause_settings_sel == 0:
-                                pause_vol = min(2.0, pause_vol + 0.1)
-                                _gs.master_volume = pause_vol
-                            elif pause_settings_sel == 1:
-                                pause_sens = min(10.0, pause_sens + 1.0)
-                                _gs.mouse_sensitivity = pause_sens / 1000.0
-                                mouse_sensitivity = _gs.mouse_sensitivity
-                            elif pause_settings_sel == 2:
-                                idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                                _gs.difficulty = _gs.DIFFICULTIES[(idx + 1) % len(_gs.DIFFICULTIES)]
-                            elif pause_settings_sel == 3:
-                                _gs.fov = min(95.0, _gs.fov + 5.0)
-                                glMatrixMode(GL_PROJECTION); glLoadIdentity()
-                                gluPerspective(_gs.fov, (DISPLAY_SIZE[0] / DISPLAY_SIZE[1]), 0.1, 80.0)
-                                glMatrixMode(GL_MODELVIEW)
-                            elif pause_settings_sel == 4:
-                                _gs.head_bobbing = not _gs.head_bobbing
-                            elif pause_settings_sel == 5:
-                                _gs.camera_shake = not _gs.camera_shake
-                            elif pause_settings_sel == 6:
-                                _gs.photosensitivity_mode = not _gs.photosensitivity_mode
-                            elif pause_settings_sel == 7:
-                                _gs.invert_mouse_y = not _gs.invert_mouse_y
+                            pause_vol, pause_sens, _ = _apply_setting_change(
+                                pause_settings_sel, 1, pause_vol, pause_sens, update_gl_proj=True
+                            )
+                            mouse_sensitivity = _gs.mouse_sensitivity
                         elif event.key in (K_RETURN, K_SPACE):
-                            if pause_settings_sel == 8:
-                                _gs.master_volume = pause_vol
-                                _gs.mouse_sensitivity = pause_sens / 1000.0
-                                mouse_sensitivity = _gs.mouse_sensitivity
+                            pause_vol, pause_sens, back = _apply_setting_change(
+                                pause_settings_sel, 1, pause_vol, pause_sens, update_gl_proj=True
+                            )
+                            mouse_sensitivity = _gs.mouse_sensitivity
+                            if back:
                                 pause_in_settings = False
-                            elif pause_settings_sel == 2:
-                                idx = _gs.DIFFICULTIES.index(_gs.difficulty) if _gs.difficulty in _gs.DIFFICULTIES else 1
-                                _gs.difficulty = _gs.DIFFICULTIES[(idx + 1) % len(_gs.DIFFICULTIES)]
-                            elif pause_settings_sel == 4:
-                                _gs.head_bobbing = not _gs.head_bobbing
-                            elif pause_settings_sel == 5:
-                                _gs.camera_shake = not _gs.camera_shake
-                            elif pause_settings_sel == 6:
-                                _gs.photosensitivity_mode = not _gs.photosensitivity_mode
-                            elif pause_settings_sel == 7:
-                                _gs.invert_mouse_y = not _gs.invert_mouse_y
+                                _gs.save_save_data()
                     elif not paused:
                         if event.key == K_m:
-                            minimap_timer_ms = pygame.time.get_ticks() + 3000
+                            minimap_timer_ms = now_ms + 3000
+                elif paused and not pause_exiting:
+                    if event.type == MOUSEMOTION:
+                        mx, my = event.pos
+                        p_rects = _get_pause_menu_rects(DISPLAY_SIZE[0], DISPLAY_SIZE[1], pause_in_settings)
+                        for idx, r in enumerate(p_rects):
+                            if r.collidepoint(mx, my):
+                                if pause_in_settings:
+                                    pause_settings_sel = idx
+                                else:
+                                    pause_selected = idx
+                                break
+                    elif event.type == MOUSEBUTTONDOWN and event.button == 1:
+                        mx, my = event.pos
+                        p_rects = _get_pause_menu_rects(DISPLAY_SIZE[0], DISPLAY_SIZE[1], pause_in_settings)
+                        for idx, r in enumerate(p_rects):
+                            if r.collidepoint(mx, my):
+                                if not pause_in_settings:
+                                    pause_selected = idx
+                                    if idx == 0:
+                                        _resume_from_pause()
+                                    elif idx == 1:
+                                        pause_in_settings = True
+                                        pause_vol = _gs.master_volume
+                                        pause_sens = _gs.mouse_sensitivity * 1000.0
+                                        pause_settings_sel = 0
+                                    elif idx == 2:
+                                        pause_exiting = True
+                                        pause_exit_alpha = 0
+                                else:
+                                    pause_settings_sel = idx
+                                    delta = -1 if (idx in (0, 1, 2, 3) and mx < r.centerx) else 1
+                                    pause_vol, pause_sens, back = _apply_setting_change(
+                                        idx, delta, pause_vol, pause_sens, update_gl_proj=True
+                                    )
+                                    mouse_sensitivity = _gs.mouse_sensitivity
+                                    if back:
+                                        pause_in_settings = False
+                                        _gs.save_save_data()
+                                break
 
 
 
@@ -1401,18 +2114,53 @@ def run_game():
                         footstep_snd.set_volume(min(1.0, (0.02 + anxiety * 0.05) * _gs.master_volume))
                         footstep_snd.play()
 
-            # ---- Pausa: cena congelada + overlay ----
+            # ---- Pausa: cena congelada completa + overlay ----
             if paused:
+                paused_total_ms += raw_dt_ms
                 pygame.mouse.get_rel()
                 glClearColor(*fog_color)
                 glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
                 glLoadIdentity()
-                gluLookAt(player_pos[0], player_pos[1] + bob_offset, player_pos[2],
+                cam_pos = (player_pos[0], player_pos[1] + bob_offset, player_pos[2])
+                gluLookAt(cam_pos[0], cam_pos[1], cam_pos[2],
                           look_x, look_y + bob_offset, look_z, 0, 1, 0)
+                glLightfv(GL_LIGHT0, GL_POSITION, (cam_pos[0], cam_pos[1], cam_pos[2], 1.0))
+                glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, light_dir)
+                glLightfv(GL_LIGHT1, GL_POSITION, (player_pos[0], player_pos[1] - 0.4, player_pos[2], 1.0))
+                _update_nearest_campfire_light(player_pos[0], player_pos[2], campfires,
+                                               pause_frozen_ms / 1000.0, _gs.photosensitivity_mode)
+
                 draw_skybox(tex_skybox, player_pos[0], player_pos[1], player_pos[2])
                 draw_floor(tex_snow, MAP_WIDTH, MAP_HEIGHT)
-                draw_maze_optimized(maze_chunks, (player_pos[0], player_pos[1] + bob_offset, player_pos[2]), max_dist=60.0)
-                draw_exit(maze_map, MAP_WIDTH, MAP_HEIGHT)
+                draw_maze_optimized(maze_chunks, cam_pos, max_dist=60.0)
+                draw_blood_trails(blood_decals)
+                for c in corpses:
+                    draw_corpse(
+                        tex_corpse, c['pos'][0], c['pos'][1],
+                        cam_pos=cam_pos, now_ms=pause_frozen_ms, searched=c['searched'],
+                    )
+                draw_footprints(now_ms=pause_frozen_ms)
+                _draw_wall_texts(wall_text_data, wall_text_textures, madness, pause_frozen_ms / 1000.0)
+                draw_exit(maze_map, MAP_WIDTH, MAP_HEIGHT, cam_pos=cam_pos, now_ms=pause_frozen_ms)
+                draw_campfires(campfires, cam_pos=cam_pos, now_ms=pause_frozen_ms)
+                for b in battery_pickups:
+                    if not b['collected']:
+                        draw_battery_pickup(b['pos'][0], b['pos'][1], pause_frozen_ms)
+                draw_flashlight_volumetric_shaft(cam_pos, light_dir, eff, blizzard_intensity)
+                draw_jack_shadow(jack_wx, jack_wz, jack_dist, madness, now_ms=pause_frozen_ms)
+                draw_jack_billboard(
+                    tex_jack, jack_wx, jack_wz, player_pos[0], player_pos[2],
+                    jack_dist, madness, pause_frozen_ms, is_fake=False,
+                    move_yaw=(jack_move_yaw if pause_frozen_ms >= next_jack_move_ms else None),
+                )
+                for fj in fake_jacks:
+                    fj_wx, fj_wz = fj['pos']
+                    fj_dist = math.dist([player_pos[0], player_pos[2]], [fj_wx, fj_wz])
+                    draw_jack_shadow(fj_wx, fj_wz, fj_dist, madness, now_ms=pause_frozen_ms)
+                    draw_jack_billboard(tex_jack, fj_wx, fj_wz, player_pos[0], player_pos[2],
+                                        fj_dist, madness, pause_frozen_ms, is_fake=True)
+                draw_particles(player_pos[0], player_pos[2], dt=0.0, blizzard_intensity=blizzard_intensity)
+                draw_viewmodel_flashlight(flashlight_on, eff, sway_x, sway_y, bob_offset, pause_frozen_ms)
                 draw_pause_overlay(pause_selected, pause_in_settings,
                                    pause_vol, pause_sens, pause_settings_sel)
                 # Fade-out ao selecionar "Sair ao Menu"
@@ -1446,6 +2194,14 @@ def run_game():
             pitch += dy_eff * mouse_sensitivity
             pitch = max(-math.pi/2 + 0.1, min(math.pi/2 - 0.1, pitch))
 
+            # Inercia suave da lanterna (weapon sway + atraso realista do facho)
+            sway_decay = max(0.0, 1.0 - 0.18 * dt_step)
+            sway_x = max(-0.045, min(0.045, sway_x * sway_decay - dx * 0.00055))
+            sway_y = max(-0.035, min(0.035, sway_y * sway_decay - dy_eff * 0.00045))
+            lag_alpha = min(1.0, 0.24 * dt_step)
+            light_yaw += (yaw - light_yaw) * lag_alpha
+            light_pitch += (pitch - light_pitch) * lag_alpha
+
             front_x = math.cos(yaw)
             front_z = math.sin(yaw)
             right_x = math.cos(yaw + math.pi/2)
@@ -1477,15 +2233,22 @@ def run_game():
 
             effective_speed = BASE_SPEED * speed_mult * dt_step
 
-            is_moving = False
+            move_dx = 0.0
+            move_dz = 0.0
             if keys[pygame.K_w] or keys[pygame.K_UP]:
-                new_x += front_x * effective_speed; new_z += front_z * effective_speed; is_moving = True
+                move_dx += front_x; move_dz += front_z
             if keys[pygame.K_s] or keys[pygame.K_DOWN]:
-                new_x -= front_x * effective_speed; new_z -= front_z * effective_speed; is_moving = True
+                move_dx -= front_x; move_dz -= front_z
             if keys[pygame.K_a] or keys[pygame.K_LEFT]:
-                new_x -= right_x * effective_speed; new_z -= right_z * effective_speed; is_moving = True
+                move_dx -= right_x; move_dz -= right_z
             if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
-                new_x += right_x * effective_speed; new_z += right_z * effective_speed; is_moving = True
+                move_dx += right_x; move_dz += right_z
+
+            move_len = math.hypot(move_dx, move_dz)
+            is_moving = move_len > 1e-5
+            if is_moving:
+                new_x += (move_dx / move_len) * effective_speed
+                new_z += (move_dz / move_len) * effective_speed
 
             # Drenagem e regeneração contínua de Stamina
             if sprinting and is_moving:
@@ -1499,9 +2262,10 @@ def run_game():
             if not is_moving and flashlight_on:
                 anxiety = max(0.0, anxiety - ANXIETY_FALL * 0.9 * dt_step)
 
-            # 2. Escuridão total (lanterna apagada) causa aumento nítido e progressivo de medo
+            # 2. Escuridão total (lanterna apagada) aumenta ansiedade; ficar parado no escuro alivia a punição
             if not flashlight_on:
-                anxiety = min(1.0, anxiety + ANXIETY_RISE * 1.1 * dt_step)
+                dark_mult = 0.45 if not is_moving else 0.95
+                anxiety = min(1.0, anxiety + ANXIETY_RISE * dark_mult * dt_step)
 
             # 3. Corrida consome fôlego e eleva a frequência cardíaca
             if sprinting:
@@ -1563,8 +2327,8 @@ def run_game():
             if hypothermia >= 1.0 and not jumpscare_active:
                 jumpscare_active = True
                 jumpscare_start_ms = now_ms
-                current_js_tex = random.choice(jumpscare_textures) if jumpscare_textures else None
-                js_effect_type = 3 # Efeito negativo para frio
+                js_effect_type = 3 # Garra congelada 3D
+                stat_jumpscares += 1
                 anxiety = 1.0
                 hypothermia = 0.5 # Reseta metade para dar uma chance
 
@@ -1604,9 +2368,11 @@ def run_game():
                 dist_fake_exit = math.dist([player_pos[0], player_pos[2]], [fake_exit_pos[0], fake_exit_pos[1]])
                 if dist_fake_exit < EXIT_REACH * 1.5:
                     fake_exit_triggered = True
-                    maze_map[fake_exit_cell[1]][fake_exit_cell[0]] = 0  # Apaga o brilho
+                    maze_map[fake_exit_cell[1]][fake_exit_cell[0]] = 5  # Fecha o portão de ferro da armadilha
                     battery = 0.0  # Apaga a lanterna (Escuro Absoluto)
                     anxiety = 1.0  # Pânico Total
+                    trap_text_timer_ms = now_ms + 3200
+                    stat_jumpscares += 1
                     if grito_snd:
                         grito_snd.play()
 
@@ -1657,6 +2423,8 @@ def run_game():
                         battery = min(1.0, battery + 0.45)
                         anxiety = max(0.0, anxiety - 0.20)
                         stat_batteries_collected += 1
+                        active_toast_key = "BATTERY"
+                        active_toast_style = "BATTERY"
                         battery_toast_timer_ms = now_ms + 2500
                         if battery_snd:
                             battery_snd.play()
@@ -1669,33 +2437,90 @@ def run_game():
             # ---- Jack Perseguidor ----
             player_grid = (int(math.floor(player_pos[0] / BLOCK_SIZE + MAP_WIDTH / 2.0 + 0.5)),
                            int(math.floor(player_pos[2] / BLOCK_SIZE + MAP_HEIGHT / 2.0 + 0.5)))
-            
-            # Resolução de Bloqueio da IA na Saída (Modo FLEE vs CHASE)
+
+            # Revela celulas exploradas no minimapa (Fog of War)
+            reveal_r = 2 if (flashlight_on and battery > 0.02) else 1
+            for ry in range(-reveal_r, reveal_r + 1):
+                for rx in range(-reveal_r, reveal_r + 1):
+                    if reveal_r == 2 and rx * rx + ry * ry > 5:
+                        continue
+                    if reveal_r == 1 and abs(rx) + abs(ry) > 1:
+                        continue
+                    vx, vy = player_grid[0] + rx, player_grid[1] + ry
+                    if 0 <= vx < MAP_WIDTH and 0 <= vy < MAP_HEIGHT:
+                        visited_cells.add((vx, vy))
+
+            # Resolução de Bloqueio da IA na Saída (Modo FLEE vs CHASE vs PATROL)
             EXIT_ZONE_DIST = BLOCK_SIZE * 6.5
             player_in_exit_zone = dist_exit < EXIT_ZONE_DIST
+            jack_dist = math.hypot(player_pos[0] - jack_wx, player_pos[2] - jack_wz)
+
+            if not player_in_exit_zone and now_ms >= next_jack_move_ms:
+                light_active = flashlight_on and battery > 0.02 and now_ms >= flicker_off_until
+                los_far = has_line_of_sight(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, player_grid, max_cells=15)
+                los_close = has_line_of_sight(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, player_grid, max_cells=4)
+                detected = (
+                    (light_active and (jack_dist < BLOCK_SIZE * 10.5 or los_far))
+                    or (sprinting and is_moving and jack_dist < BLOCK_SIZE * 8.5)
+                    or (jack_dist < BLOCK_SIZE * 2.6 or los_close)
+                )
+                if detected:
+                    jack_last_known_cell = player_grid
+                    jack_alerted = True
 
             if now_ms >= next_jack_move_ms:
-                if player_in_exit_zone:
-                    # Modo FLEE: Jack recua em direção ao ponto mais distante da saída
-                    corner_a = (1, 1)
-                    corner_b = (MAP_WIDTH - 3, MAP_HEIGHT - 3)
-                    dist_a = abs(exit_grid[0] - corner_a[0]) + abs(exit_grid[1] - corner_a[1])
-                    dist_b = abs(exit_grid[0] - corner_b[0]) + abs(exit_grid[1] - corner_b[1])
-                    retreat_goal = corner_a if dist_a > dist_b else corner_b
-                    
-                    next_step = bfs_next_step(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, retreat_goal)
-                    if next_step:
-                        jack_pos = next_step
-                    next_jack_move_ms = now_ms + int(jack_move_interval * 0.75)
-                else:
-                    # Modo CHASE: Persegue o jogador via BFS
-                    next_step = bfs_next_step(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, player_grid)
-                    if next_step:
-                        jack_pos = next_step
-                    next_jack_move_ms = now_ms + jack_move_interval
+                tx = (jack_target_cell[0] - MAP_WIDTH / 2.0) * BLOCK_SIZE
+                tz = (jack_target_cell[1] - MAP_HEIGHT / 2.0) * BLOCK_SIZE
+                jdx = tx - jack_wx
+                jdz = tz - jack_wz
+                jdist_wp = math.hypot(jdx, jdz)
+                if jdist_wp < 0.15:
+                    jack_pos = jack_target_cell
+                    nxt = None
+                    if player_in_exit_zone:
+                        # Modo FLEE: Jack recua em direcao a celula aberta mais distante da saida
+                        jack_alerted = False
+                        jack_last_known_cell = None
+                        retreat_goal = find_distant_open_cell(
+                            maze_map, MAP_WIDTH, MAP_HEIGHT, exit_grid, avoid_pos=player_grid
+                        )
+                        nxt = bfs_next_step(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, retreat_goal)
+                    elif jack_last_known_cell is not None and jack_pos != jack_last_known_cell:
+                        # Modo CHASE / INVESTIGATE: vai ate a ultima posicao vista/ouvida
+                        nxt = bfs_next_step(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, jack_last_known_cell)
+                    else:
+                        # Modo PATROL: jogador apagou a lanterna e saiu da linha de visao
+                        jack_last_known_cell = None
+                        jack_alerted = False
+                        if jack_patrol_goal is None or jack_pos == jack_patrol_goal:
+                            patrol_cands = [
+                                c for c in empty_cells
+                                if abs(c[0] - jack_pos[0]) + abs(c[1] - jack_pos[1]) >= 6
+                            ]
+                            if patrol_cands:
+                                jack_patrol_goal = random.choice(patrol_cands)
+                            else:
+                                jack_patrol_goal = find_distant_open_cell(
+                                    maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, avoid_pos=exit_grid
+                                )
+                        nxt = bfs_next_step(maze_map, MAP_WIDTH, MAP_HEIGHT, jack_pos, jack_patrol_goal)
+                        if nxt is None:
+                            jack_patrol_goal = None
+                    if nxt:
+                        jack_target_cell = nxt
+                        tx = (jack_target_cell[0] - MAP_WIDTH / 2.0) * BLOCK_SIZE
+                        tz = (jack_target_cell[1] - MAP_HEIGHT / 2.0) * BLOCK_SIZE
+                        jdx = tx - jack_wx
+                        jdz = tz - jack_wz
+                        jdist_wp = math.hypot(jdx, jdz)
+                if jdist_wp > 1e-4:
+                    speed_factor = 1.25 if player_in_exit_zone else (1.0 if jack_alerted else 0.76)
+                    cur_j_speed = jack_speed * speed_factor
+                    step_m = min(jdist_wp, cur_j_speed * dt)
+                    jack_wx += (jdx / jdist_wp) * step_m
+                    jack_wz += (jdz / jdist_wp) * step_m
+                    jack_move_yaw = math.atan2(jdz, jdx)
 
-            jack_wx = (jack_pos[0] - MAP_WIDTH  / 2) * BLOCK_SIZE
-            jack_wz = (jack_pos[1] - MAP_HEIGHT / 2) * BLOCK_SIZE
             jack_dist = math.sqrt((player_pos[0]-jack_wx)**2 + (player_pos[2]-jack_wz)**2)
 
             # Terror psicológico: ansiedade sobe progressivamente com a proximidade do Jack
@@ -1714,23 +2539,37 @@ def run_game():
             if player_in_exit_zone:
                 # Se o jogador estiver na zona de saída e o Jack se aproximar, Jack se dissipa na névoa e é expulso para o fundo do labirinto
                 if jack_dist < BLOCK_SIZE * 2.5:
-                    corner_a = (1, 1)
-                    corner_b = (MAP_WIDTH - 3, MAP_HEIGHT - 3)
-                    dist_a = abs(exit_grid[0] - corner_a[0]) + abs(exit_grid[1] - corner_a[1])
-                    dist_b = abs(exit_grid[0] - corner_b[0]) + abs(exit_grid[1] - corner_b[1])
-                    jack_pos = corner_a if dist_a > dist_b else corner_b
+                    jack_pos = find_distant_open_cell(
+                        maze_map, MAP_WIDTH, MAP_HEIGHT, exit_grid, avoid_pos=player_grid
+                    )
+                    jack_target_cell = jack_pos
+                    jack_wx = (jack_pos[0] - MAP_WIDTH / 2.0) * BLOCK_SIZE
+                    jack_wz = (jack_pos[1] - MAP_HEIGHT / 2.0) * BLOCK_SIZE
+                    jack_dist = math.hypot(player_pos[0] - jack_wx, player_pos[2] - jack_wz)
+                    jack_last_known_cell = None
+                    jack_patrol_goal = None
+                    jack_alerted = False
                     next_jack_move_ms = now_ms + 12000
             else:
                 # Jack captura o jogador fora da zona de saída
-                if jack_dist < BLOCK_SIZE * 1.8 and not jumpscare_active and not in_panic:
+                if jack_dist < BLOCK_SIZE * 1.8 and not jumpscare_active:
                     jumpscare_active   = True
                     jumpscare_start_ms = now_ms
-                    current_js_tex     = random.choice(jumpscare_textures)
-                    js_effect_type     = random.choice([0, 1, 2, 3]) if madness > 0.4 else 1
+                    js_effect_type     = random.choice([0, 1])
+                    stat_jumpscares   += 1
                     if grito_snd: grito_snd.play()
                     anxiety = min(1.0, anxiety + 0.5)  # Sobe ansiedade sem forçar 1.0 direto
-                    # Reinicia Jack longe
-                    jack_pos = (MAP_WIDTH - 3, MAP_HEIGHT - 3)
+                    # Reinicia Jack longe em celula aberta valida
+                    jack_pos = find_distant_open_cell(
+                        maze_map, MAP_WIDTH, MAP_HEIGHT, player_grid, avoid_pos=exit_grid
+                    )
+                    jack_target_cell = jack_pos
+                    jack_wx = (jack_pos[0] - MAP_WIDTH / 2.0) * BLOCK_SIZE
+                    jack_wz = (jack_pos[1] - MAP_HEIGHT / 2.0) * BLOCK_SIZE
+                    jack_dist = math.hypot(player_pos[0] - jack_wx, player_pos[2] - jack_wz)
+                    jack_last_known_cell = None
+                    jack_patrol_goal = None
+                    jack_alerted = False
                     next_jack_move_ms = now_ms + 18000  # Mais tempo antes de voltar
 
             # Jack imita respiração/sussurro se estiver perto mas não atacando (3D espacializado)
@@ -1772,30 +2611,28 @@ def run_game():
                 chosen.play()
                 next_whisper_ms = now_ms + random.randint(whisper_min_ms, whisper_max_ms)
 
-            # ---- Jumpscare por zona (não perto da saída) ----
+            # ---- Jumpscare por zona (nao perto da saida) ----
             cur_cell = (int(math.floor((player_pos[0] / BLOCK_SIZE) + MAP_WIDTH / 2.0 + 0.5)),
                         int(math.floor((player_pos[2] / BLOCK_SIZE) + MAP_HEIGHT / 2.0 + 0.5)))
             if cur_cell in trigger_zones and cur_cell not in triggered_zones and dist_exit > BLOCK_SIZE * 6:
                 triggered_zones.add(cur_cell)
-                if jumpscare_textures:
-                    current_js_tex = random.choice(jumpscare_textures)
-                    jumpscare_active   = True
-                    jumpscare_start_ms = now_ms
-                    stat_jumpscares += 1
-                    # Efeito varia com loucura: 0=normal, 1=flash, 2=glitch, 3=negativo
-                    if madness < 0.2:
-                        js_effect_type = 0  # normal sempre
-                    elif madness < 0.5:
-                        js_effect_type = random.choice([0, 1])
-                    elif madness < 0.8:
-                        js_effect_type = random.choice([0, 1, 2])
-                    else:
-                        js_effect_type = random.choice([0, 1, 2, 3])
-                    if scare_snd:
-                        scare_snd.set_volume(min(1.0, vol_mult))
-                        scare_snd.play()
-                    # Spike na ansiedade!
-                    anxiety = min(1.0, anxiety + 0.5)
+                jumpscare_active   = True
+                jumpscare_start_ms = now_ms
+                stat_jumpscares += 1
+                # Tipo 3D varia com loucura: 0=Jack, 1=Jack Flash, 2=Gemeas Grady, 3=Garra Congelada
+                if madness < 0.2:
+                    js_effect_type = 0
+                elif madness < 0.5:
+                    js_effect_type = random.choice([0, 1])
+                elif madness < 0.8:
+                    js_effect_type = random.choice([0, 1, 2])
+                else:
+                    js_effect_type = random.choice([0, 1, 2, 3])
+                if scare_snd:
+                    scare_snd.set_volume(min(1.0, vol_mult))
+                    scare_snd.play()
+                # Spike na ansiedade!
+                anxiety = min(1.0, anxiety + 0.5)
 
             # Desativa jumpscare após duração
             if jumpscare_active and now_ms - jumpscare_start_ms > JUMPSCARE_DUR_MS:
@@ -1824,19 +2661,19 @@ def run_game():
                     dizzy_active   = False
                     dizzy_strength = 0.0
 
-            # ---- Partículas de Inseto (aparecem com menos frequência) ----
-            if not bug_active and now_ms >= next_bug_ms:
-                bug_active    = True
-                bug_start_ms  = now_ms
-                bug_particles = spawn_bug_particles()
-                next_bug_ms   = now_ms + random.randint(
+            # ---- Veios de Frio / Delirio nas Bordas ----
+            if not frost_creep_active and now_ms >= next_frost_creep_ms:
+                frost_creep_active   = True
+                frost_creep_start_ms = now_ms
+                frost_veins          = spawn_frost_veins()
+                next_frost_creep_ms  = now_ms + random.randint(
                     max(90000, 180000 - cc * 12000),
                     max(120000, 260000 - cc * 18000)
                 )
 
-            if bug_active and now_ms - bug_start_ms > BUG_DUR_MS:
-                bug_active    = False
-                bug_particles = []
+            if frost_creep_active and now_ms - frost_creep_start_ms > FROST_CREEP_DUR_MS:
+                frost_creep_active = False
+                frost_veins        = []
 
             # ---- Lanterna com Bateria + Tremido ----
             t_s = now_ms / 1000.0
@@ -1919,7 +2756,7 @@ def run_game():
             bob_offset = (math.sin(bob_time) * 0.05) if _gs.head_bobbing else 0.0
 
             # ---- Registra pegada a cada "passo" (semi-período do bobbing) ----
-            maybe_add_footprint(player_pos[0], player_pos[2], yaw, is_moving)
+            maybe_add_footprint(player_pos[0], player_pos[2], yaw, is_moving, now_ms=now_ms)
 
             # ---- Física de Som Espacial 3D ----
             if hum_ch is not None:
@@ -1939,7 +2776,7 @@ def run_game():
             # ---- Detecção de saída por proximidade (sempre ativa) ----
             if dist_exit < EXIT_REACH:
                 pygame.mixer.stop()
-                run_time = (pygame.time.get_ticks() - run_start_ms) / 1000.0
+                run_time = (now_ms - run_start_ms) / 1000.0
                 return ("END", run_time, stat_distance, stat_jumpscares, stat_peak_anxiety, stat_batteries_collected)
 
             # ---- Redução de efeitos perto da saída ----
@@ -1953,7 +2790,7 @@ def run_game():
             col_x = check_collision(new_x, player_pos[2], radius=0.35)
             if col_x == "EXIT":
                 pygame.mixer.stop()
-                run_time = (pygame.time.get_ticks() - run_start_ms) / 1000.0
+                run_time = (now_ms - run_start_ms) / 1000.0
                 return ("END", run_time, stat_distance, stat_jumpscares, stat_peak_anxiety, stat_batteries_collected)
             elif not col_x:
                 player_pos[0] = new_x
@@ -1961,7 +2798,7 @@ def run_game():
             col_z = check_collision(player_pos[0], new_z, radius=0.35)
             if col_z == "EXIT":
                 pygame.mixer.stop()
-                run_time = (pygame.time.get_ticks() - run_start_ms) / 1000.0
+                run_time = (now_ms - run_start_ms) / 1000.0
                 return ("END", run_time, stat_distance, stat_jumpscares, stat_peak_anxiety, stat_batteries_collected)
             elif not col_z:
                 player_pos[2] = new_z
@@ -1983,11 +2820,18 @@ def run_game():
                       look_target[0], look_target[1], look_target[2],
                       0, 1, 0)
 
-            # Iluminação posicionada no espaço de visão da câmera
+            # Iluminação posicionada no espaço de visão da câmera (com atraso suave do facho)
             look_dir = (look_x - player_pos[0], look_y - player_pos[1], look_z - player_pos[2])
+            light_dx = math.cos(light_pitch + shake_pitch) * math.cos(light_yaw + shake_yaw)
+            light_dy = math.sin(light_pitch + shake_pitch)
+            light_dz = math.cos(light_pitch + shake_pitch) * math.sin(light_yaw + shake_yaw)
+            light_dir = (light_dx, light_dy, light_dz)
             glLightfv(GL_LIGHT0, GL_POSITION, (cam_pos[0], cam_pos[1], cam_pos[2], 1.0))
-            glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, look_dir)
+            glLightfv(GL_LIGHT0, GL_SPOT_DIRECTION, light_dir)
             glLightfv(GL_LIGHT1, GL_POSITION, (player_pos[0], player_pos[1] - 0.4, player_pos[2], 1.0))
+
+            # Luz dinamica da fogueira mais proxima (< 18m)
+            _update_nearest_campfire_light(player_pos[0], player_pos[2], campfires, t_s, _gs.photosensitivity_mode)
 
             # 1. Desenha o Skybox no fundo de tudo
             draw_skybox(tex_skybox, player_pos[0], player_pos[1], player_pos[2])
@@ -1999,48 +2843,18 @@ def run_game():
             draw_maze_optimized(maze_chunks, cam_pos, max_dist=60.0)
             draw_blood_trails(blood_decals)
             for c in corpses:
-                draw_corpse(tex_corpse, c['pos'][0], c['pos'][1])
-            draw_footprints()
+                draw_corpse(
+                    tex_corpse, c['pos'][0], c['pos'][1],
+                    cam_pos=cam_pos, now_ms=now_ms, searched=c['searched'],
+                )
+            draw_footprints(now_ms=now_ms)
 
             # 2b. Textos nas paredes (surgem conforme madness)
-            if wall_text_data:
-                WALL_H = 2.5   # altura do texto no mundo
-                TEXT_W = 1.6   # metade da largura
-                TEXT_H = 0.45  # metade da altura
-                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
-                glDisable(GL_LIGHTING)
-                glEnable(GL_TEXTURE_2D)
-                glEnable(GL_BLEND)
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                for (wx, wz, ndx, ndz, label, min_mad) in wall_text_data:
-                    if madness < min_mad:
-                        continue
-                    fade = min(1.0, (madness - min_mad) / 0.12)  # aparece gradualmente
-                    # Pulsa levemente
-                    pulse = 0.7 + 0.3 * abs(math.sin(t_s * 1.8 + wx))
-                    alpha = fade * pulse
-                    tid, umax, vmax = wall_text_textures[label]
-                    glBindTexture(GL_TEXTURE_2D, tid)
-                    glColor4f(1.0, 0.08, 0.08, alpha)
-                    # Eixos da face dependem do normal
-                    wy = WALL_H
-                    glBegin(GL_QUADS)
-                    if abs(ndx) > 0.5:  # face aponta em X → quad no plano Y-Z
-                        glTexCoord2f(0, vmax);    glVertex3f(wx, wy - TEXT_H, wz - TEXT_W)
-                        glTexCoord2f(umax, vmax); glVertex3f(wx, wy - TEXT_H, wz + TEXT_W)
-                        glTexCoord2f(umax, 0);    glVertex3f(wx, wy + TEXT_H, wz + TEXT_W)
-                        glTexCoord2f(0, 0);       glVertex3f(wx, wy + TEXT_H, wz - TEXT_W)
-                    else:               # face aponta em Z → quad no plano X-Y
-                        glTexCoord2f(0, vmax);    glVertex3f(wx - TEXT_W, wy - TEXT_H, wz)
-                        glTexCoord2f(umax, vmax); glVertex3f(wx + TEXT_W, wy - TEXT_H, wz)
-                        glTexCoord2f(umax, 0);    glVertex3f(wx + TEXT_W, wy + TEXT_H, wz)
-                        glTexCoord2f(0, 0);       glVertex3f(wx - TEXT_W, wy + TEXT_H, wz)
-                    glEnd()
-                glPopAttrib()
+            _draw_wall_texts(wall_text_data, wall_text_textures, madness, t_s)
 
             # 4. Saída animada
-            draw_exit(maze_map, MAP_WIDTH, MAP_HEIGHT)
-            draw_campfires(campfires)
+            draw_exit(maze_map, MAP_WIDTH, MAP_HEIGHT, cam_pos=cam_pos, now_ms=now_ms)
+            draw_campfires(campfires, cam_pos=cam_pos, now_ms=now_ms)
 
             # 4b. Pickups 3D de Bateria
             for b in battery_pickups:
@@ -2048,63 +2862,47 @@ def run_game():
                     draw_battery_pickup(b['pos'][0], b['pos'][1], now_ms)
 
             # Cone volumétrico e feixes de luz da lanterna (Spotlight + Shafts)
-            draw_flashlight_volumetric_shaft(cam_pos, look_dir, eff, blizzard_intensity)
+            draw_flashlight_volumetric_shaft(cam_pos, light_dir, eff, blizzard_intensity)
 
-            # 3. Desenha o Jack (e os Falsos Jacks) com Billboard 3D e sombra projetada
-            draw_jack_shadow(jack_wx, jack_wz, jack_dist, madness)
-            draw_jack_billboard(tex_jack, jack_wx, jack_wz, player_pos[0], player_pos[2], jack_dist, madness, now_ms, is_fake=False)
+            # 3. Desenha o Jack (e os Falsos Jacks) em 3D articulado com sombra projetada
+            draw_jack_shadow(jack_wx, jack_wz, jack_dist, madness, now_ms=now_ms)
+            draw_jack_billboard(
+                tex_jack, jack_wx, jack_wz, player_pos[0], player_pos[2],
+                jack_dist, madness, now_ms, is_fake=False,
+                move_yaw=(jack_move_yaw if now_ms >= next_jack_move_ms else None),
+            )
             for fj in fake_jacks:
                 fj_wx, fj_wz = fj['pos']
                 fj_dist = math.dist([player_pos[0], player_pos[2]], [fj_wx, fj_wz])
-                draw_jack_shadow(fj_wx, fj_wz, fj_dist, madness)
+                draw_jack_shadow(fj_wx, fj_wz, fj_dist, madness, now_ms=now_ms)
                 draw_jack_billboard(tex_jack, fj_wx, fj_wz, player_pos[0], player_pos[2], fj_dist, madness, now_ms, is_fake=True)
 
             # 4. Partículas e Bafadas de Frio (billboards)
-            draw_particles(player_pos[0], player_pos[2], dt)
+            draw_particles(player_pos[0], player_pos[2], dt, blizzard_intensity=blizzard_intensity)
             draw_ceiling_drips(blood_drip_zones, now_ms)
 
             # 5b. Bafadas de Frio (billboards)
             draw_breath_puffs(breath_puffs, now_ms, yaw)
 
+            # 5b-2. Lanterna tatica 3D em primeira pessoa (com weapon sway)
+            if not jumpscare_active:
+                draw_viewmodel_flashlight(flashlight_on, eff, sway_x, sway_y, bob_offset, now_ms)
+
             # 5c. Aberração Cromática (efeito de alucinação em alta ansiedade)
-            if anxiety > 0.6:
+            if anxiety > 0.6 and not _gs.photosensitivity_mode:
                 draw_chromatic_aberration((anxiety - 0.6) / 0.4)
 
 
             # 5. Overlays 2D (HUD)
             toast_remaining = battery_toast_timer_ms - now_ms
             toast_alpha = max(0.0, min(1.0, toast_remaining / 400.0)) if toast_remaining > 0 else 0.0
-            draw_anxiety_hud(anxiety, battery, stamina=stamina, hypothermia=hypothermia,
-                             blood_overlay_timer=blood_overlay_timer,
-                             flashlight_on=flashlight_on, battery_toast_alpha=toast_alpha)
-
-            if toast_alpha > 0.0 and battery_toast_tex:
-                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
-                W2, H2 = DISPLAY_SIZE
-                glOrtho(0, W2, H2, 0, -1, 1)
-                glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity()
-                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
-                glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
-                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                
-                tid, u_max, v_max = battery_toast_tex
-                glEnable(GL_TEXTURE_2D)
-                glBindTexture(GL_TEXTURE_2D, tid)
-                glColor4f(1.0, 1.0, 1.0, toast_alpha)
-                
-                TW = int(210); TH = int(16)
-                TX = (W2 - TW) // 2; TY = H2 - 58
-                glBegin(GL_QUADS)
-                glTexCoord2f(0, 0);         glVertex2f(TX, TY)
-                glTexCoord2f(u_max, 0);     glVertex2f(TX + TW, TY)
-                glTexCoord2f(u_max, v_max); glVertex2f(TX + TW, TY + TH)
-                glTexCoord2f(0, v_max);     glVertex2f(TX, TY + TH)
-                glEnd()
-                
-                glPopAttrib()
-                glMatrixMode(GL_PROJECTION); glPopMatrix()
-                glMatrixMode(GL_MODELVIEW); glPopMatrix()
-                glEnable(GL_DEPTH_TEST)
+            draw_anxiety_hud(
+                anxiety, battery, stamina=stamina, hypothermia=hypothermia,
+                blood_overlay_timer=blood_overlay_timer,
+                flashlight_on=flashlight_on, battery_toast_alpha=toast_alpha,
+                near_campfire=near_campfire, toast_style=active_toast_style,
+                now_ms=now_ms,
+            )
 
             # ---- Prompt de Interação ----
             near_unsearched = False
@@ -2114,38 +2912,20 @@ def run_game():
                     if c_dist < BLOCK_SIZE * 1.5:
                         near_unsearched = True
                         break
-            
-            if near_unsearched and interact_tex_info:
-                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
-                W2, H2 = DISPLAY_SIZE
-                glOrtho(0, W2, H2, 0, -1, 1)
-                glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity()
-                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
-                glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
-                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                
-                tid, u_max, v_max = interact_tex_info
-                glEnable(GL_TEXTURE_2D)
-                glBindTexture(GL_TEXTURE_2D, tid)
-                glColor4f(1, 1, 1, 1)
-                
-                TW = int(600); TH = int(60)
-                TX = (W2 - TW) // 2; TY = H2 - 120
-                glBegin(GL_QUADS)
-                glTexCoord2f(0, 0);         glVertex2f(TX, TY)
-                glTexCoord2f(u_max, 0);     glVertex2f(TX + TW, TY)
-                glTexCoord2f(u_max, v_max); glVertex2f(TX + TW, TY + TH)
-                glTexCoord2f(0, v_max);     glVertex2f(TX, TY + TH)
-                glEnd()
-                
-                glPopAttrib()
-                glMatrixMode(GL_PROJECTION); glPopMatrix()
-                glMatrixMode(GL_MODELVIEW); glPopMatrix()
-                glEnable(GL_DEPTH_TEST)
 
-            # 6b. Minimapa
+            _draw_hud_badges_and_prompt(
+                toast_alpha, toast_textures.get(active_toast_key),
+                near_campfire, campfire_badge_tex,
+                near_unsearched, prompt_e_textures, now_ms,
+            )
+
+            # 6b. Minimapa com Fog of War
             if now_ms < minimap_timer_ms:
-                draw_minimap(maze_map, MAP_WIDTH, MAP_HEIGHT, player_pos[0], player_pos[2])
+                draw_minimap(
+                    maze_map, MAP_WIDTH, MAP_HEIGHT, player_pos[0], player_pos[2],
+                    yaw=yaw, visited_cells=visited_cells, campfires=campfires,
+                    corpses=corpses, jack_dist=jack_dist, now_ms=now_ms,
+                )
 
             # 6c. Piscar de tela (tela preta por frames)
             if blink_active:
@@ -2191,214 +2971,62 @@ def run_game():
 
             # 7. Jumpscare com variações visuais baseadas em loucura
             if trap_text_timer_ms > now_ms:
-                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
-                W2, H2 = DISPLAY_SIZE
-                glOrtho(0, W2, H2, 0, -1, 1)
-                glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity()
-                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
-                glDisable(GL_LIGHTING); glDisable(GL_DEPTH_TEST)
-                glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                
-                tid, u_max, v_max = trap_tex_info
-                glEnable(GL_TEXTURE_2D)
-                glBindTexture(GL_TEXTURE_2D, tid)
-                glColor4f(1, 1, 1, 1)
-                
-                # Draw text overlay
-                TW = int(800); TH = int(120)
-                TX = (W2 - TW) // 2; TY = (H2 - TH) // 2
-                glBegin(GL_QUADS)
-                glTexCoord2f(0, 0);         glVertex2f(TX, TY)
-                glTexCoord2f(u_max, 0);     glVertex2f(TX + TW, TY)
-                glTexCoord2f(u_max, v_max); glVertex2f(TX + TW, TY + TH)
-                glTexCoord2f(0, v_max);     glVertex2f(TX, TY + TH)
-                glEnd()
-                
-                glPopAttrib()
-                glMatrixMode(GL_PROJECTION); glPopMatrix()
-                glMatrixMode(GL_MODELVIEW); glPopMatrix()
-                glEnable(GL_DEPTH_TEST)
+                _draw_trap_banner(
+                    trap_banner_textures, trap_text_timer_ms - now_ms,
+                    now_ms, _gs.photosensitivity_mode,
+                )
 
-            elif jumpscare_active and current_js_tex is not None:
-                W2, H2 = DISPLAY_SIZE
+            elif jumpscare_active:
                 js_age = (now_ms - jumpscare_start_ms) / max(JUMPSCARE_DUR_MS, 1)
+                draw_jumpscare_3d(js_effect_type, js_age, madness, now_ms, _gs.photosensitivity_mode)
 
-                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
-                glOrtho(0, W2, H2, 0, -1, 1)
-                glMatrixMode(GL_MODELVIEW);  glPushMatrix(); glLoadIdentity()
-                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
-                glDisable(GL_LIGHTING); glDisable(GL_FOG); glDisable(GL_DEPTH_TEST)
-                glEnable(GL_BLEND)
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-                if js_effect_type == 1:
-                    # ---- Flash Branco: tela explode em branco (suavizado em modo fotossensibilidade) ----
-                    if _gs.photosensitivity_mode:
-                        glDisable(GL_TEXTURE_2D)
-                        glColor4f(0.0, 0.0, 0.0, 0.75)
-                        glBegin(GL_QUADS)
-                        glVertex2f(0, 0); glVertex2f(W2, 0)
-                        glVertex2f(W2, H2); glVertex2f(0, H2)
-                        glEnd()
-                    else:
-                        flash_alpha = max(0.0, 1.0 - js_age * 2.0)
-                        glDisable(GL_TEXTURE_2D)
-                        glColor4f(1.0, 1.0, 1.0, flash_alpha)
-                        glBegin(GL_QUADS)
-                        glVertex2f(0, 0); glVertex2f(W2, 0)
-                        glVertex2f(W2, H2); glVertex2f(0, H2)
-                        glEnd()
-
-                elif js_effect_type == 2:
-                    # ---- Glitch: imagem deslocada em tiras horizontais ----
-                    glDisable(GL_TEXTURE_2D)
-                    glColor4f(0.0, 0.0, 0.0, 0.9)
-                    glBegin(GL_QUADS)
-                    glVertex2f(0,0); glVertex2f(W2,0)
-                    glVertex2f(W2,H2); glVertex2f(0,H2)
-                    glEnd()
-                    glEnable(GL_TEXTURE_2D)
-
-                    JS_W = int(W2 * 0.85); JS_H = int(H2 * 0.85)
-                    JS_X = (W2 - JS_W) // 2; JS_Y = (H2 - JS_H) // 2
-                    glBindTexture(GL_TEXTURE_2D, current_js_tex)
-                    # Renderiza em tiras com offsets aleatórios de glitch
-                    STRIPS = 12
-                    sh = JS_H // STRIPS
-                    for i in range(STRIPS):
-                        ox = random.randint(-30, 30)
-                        y0 = JS_Y + i * sh
-                        y1 = y0 + sh
-                        t0 = i / STRIPS; t1 = (i + 1) / STRIPS
-                        glColor3f(1, 1, 1)
-                        glBegin(GL_QUADS)
-                        glTexCoord2f(0, t0); glVertex2f(JS_X + ox,        y0)
-                        glTexCoord2f(1, t0); glVertex2f(JS_X + JS_W + ox, y0)
-                        glTexCoord2f(1, t1); glVertex2f(JS_X + JS_W + ox, y1)
-                        glTexCoord2f(0, t1); glVertex2f(JS_X + ox,        y1)
-                        glEnd()
-                    # Sobreposição vermelha piscando
-                    glDisable(GL_TEXTURE_2D)
-                    pulse = abs(math.sin(now_ms / 80.0))
-                    glColor4f(1.0, 0.0, 0.0, pulse * 0.4)
-                    glBegin(GL_QUADS)
-                    glVertex2f(0,0); glVertex2f(W2,0)
-                    glVertex2f(W2,H2); glVertex2f(0,H2)
-                    glEnd()
-
-                elif js_effect_type == 3:
-                    # ---- Negativo/Vermelho: tudo invertido e saturado de vermelho ----
-                    glDisable(GL_TEXTURE_2D)
-                    glColor4f(0.6, 0.0, 0.0, 0.92)
-                    glBegin(GL_QUADS)
-                    glVertex2f(0,0); glVertex2f(W2,0)
-                    glVertex2f(W2,H2); glVertex2f(0,H2)
-                    glEnd()
-                    glEnable(GL_TEXTURE_2D)
-
-                    JS_W = W2; JS_H = H2
-                    JS_X = 0; JS_Y = 0
-                    glBindTexture(GL_TEXTURE_2D, current_js_tex)
-                    glBlendFunc(GL_ONE_MINUS_DST_COLOR, GL_ZERO)  # Blend de inversão
-                    glColor3f(1, 1, 1)
-                    glBegin(GL_QUADS)
-                    glTexCoord2f(0,0); glVertex2f(0,   0)
-                    glTexCoord2f(1,0); glVertex2f(W2,  0)
-                    glTexCoord2f(1,1); glVertex2f(W2,  H2)
-                    glTexCoord2f(0,1); glVertex2f(0,   H2)
-                    glEnd()
-                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-
-                else:
-                    # ---- Normal (tipo 0): centralizado com fundo escuro ----
-                    glDisable(GL_TEXTURE_2D)
-                    glColor4f(0.0, 0.0, 0.0, 0.82)
-                    glBegin(GL_QUADS)
-                    glVertex2f(0, 0); glVertex2f(W2, 0)
-                    glVertex2f(W2, H2); glVertex2f(0, H2)
-                    glEnd()
-                    glEnable(GL_TEXTURE_2D)
-
-                    JS_W = int(W2 * 0.65); JS_H = int(H2 * 0.65)
-                    JS_X = (W2 - JS_W) // 2; JS_Y = (H2 - JS_H) // 2
-                    glBindTexture(GL_TEXTURE_2D, current_js_tex)
-                    glColor3f(1, 1, 1)
-                    glBegin(GL_QUADS)
-                    glTexCoord2f(0, 0); glVertex2f(JS_X,        JS_Y)
-                    glTexCoord2f(1, 0); glVertex2f(JS_X + JS_W, JS_Y)
-                    glTexCoord2f(1, 1); glVertex2f(JS_X + JS_W, JS_Y + JS_H)
-                    glTexCoord2f(0, 1); glVertex2f(JS_X,        JS_Y + JS_H)
-                    glEnd()
-
-                glPopAttrib()
-                glMatrixMode(GL_PROJECTION); glPopMatrix()
-                glMatrixMode(GL_MODELVIEW);  glPopMatrix()
-                glEnable(GL_DEPTH_TEST)
-
-            # 8. Partículas de Inseto – quadradinhos marrons subindo pelo personagem
-            if bug_active and bug_particles:
-                bug_age_ratio = (now_ms - bug_start_ms) / BUG_DUR_MS  # 0.0 → 1.0
+            # 8. Veios organicos de frio / delirio nas bordas da tela
+            if frost_creep_active and frost_veins:
+                creep_age = (now_ms - frost_creep_start_ms) / FROST_CREEP_DUR_MS
                 W2b, H2b = DISPLAY_SIZE
 
                 glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity()
                 glOrtho(0, W2b, H2b, 0, -1, 1)
                 glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
-                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT)
+                glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT)
                 glDisable(GL_LIGHTING); glDisable(GL_FOG); glDisable(GL_DEPTH_TEST)
                 glDisable(GL_TEXTURE_2D)
                 glEnable(GL_BLEND)
                 glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-                glBegin(GL_QUADS)
 
-                for p in bug_particles:
-                    # Tempo local por partícula (com delay e speed individuais)
-                    t_raw = (bug_age_ratio - p['delay']) / max(1.0 - p['delay'], 0.01)
-                    t = max(0.0, min(t_raw * p['speed'], 1.0))
-
-                    # Fase 0 (0→0.45): spawn → pé do jogador (chão)
-                    # Fase 1 (0.45→0.88): pé → rosto (subindo)
-                    # Fase 2 (0.88→1.0): fadeout no rosto
-                    if t < 0.45:
-                        tt = t / 0.45
-                        # ease-in quadrático
-                        tt = tt * tt
-                        x = p['sx'] + (p['fx'] - p['sx']) * tt
-                        y = p['sy'] + (p['fy'] - p['sy']) * tt
-                    elif t < 0.88:
-                        tt = (t - 0.45) / 0.43
-                        # ease-out: desacelera no rosto
-                        tt = 1.0 - (1.0 - tt) * (1.0 - tt)
-                        x = p['fx'] + (p['ex'] - p['fx']) * tt
-                        y = p['fy'] + (p['ey'] - p['fy']) * tt
-                    else:
-                        x = p['ex'] + math.sin(t * 30 + p['wobble']) * 4
-                        y = p['ey']
-
-                    # Oscilação lateral (imita rastejo)
-                    x += math.sin(t * 22 + p['wobble']) * 6
-
-                    # Alpha: surge rápido, some devagar no final
-                    if t < 0.08:
-                        alpha = t / 0.08
-                    elif t > 0.88:
-                        alpha = 1.0 - (t - 0.88) / 0.12
-                    else:
-                        alpha = 1.0
-
-                    if alpha <= 0.0 or t <= 0.0:
+                for v in frost_veins:
+                    t_raw = (creep_age - v['delay']) / max(1.0 - v['delay'], 0.01)
+                    t = max(0.0, min(t_raw * v['speed'], 1.0))
+                    if t <= 0.0:
+                        continue
+                    grow = min(1.0, t / 0.55)
+                    fade = 1.0 if t < 0.72 else max(0.0, 1.0 - (t - 0.72) / 0.28)
+                    alpha = fade * (0.78 if v['blood'] else 0.72)
+                    if alpha <= 0.01:
                         continue
 
-                    # Cor marrom com variação
-                    br = p['brown'] / 255.0
-                    glColor4f(br, br * 0.45, br * 0.1, alpha)
+                    pts = v['pts']
+                    max_seg = max(1, int(math.ceil(grow * (len(pts) - 1))))
+                    cr, cg, cb = (0.55, 0.05, 0.07) if v['blood'] else (0.76, 0.90, 0.98)
 
-                    s = p['size']
-                    glVertex2f(x,     y)
-                    glVertex2f(x + s, y)
-                    glVertex2f(x + s, y + s)
-                    glVertex2f(x,     y + s)
+                    glLineWidth(v['width'])
+                    glBegin(GL_LINE_STRIP)
+                    for idx in range(min(len(pts), max_seg + 1)):
+                        p_fade = max(0.0, 1.0 - (idx / float(max(1, len(pts) - 1))) * 0.65)
+                        glColor4f(cr, cg, cb, alpha * p_fade)
+                        glVertex2f(pts[idx][0], pts[idx][1])
+                    glEnd()
 
-                glEnd()
+                    if grow > 0.35 and v['branches']:
+                        glLineWidth(max(1.0, v['width'] * 0.65))
+                        glBegin(GL_LINES)
+                        for b0, b1 in v['branches']:
+                            glColor4f(cr, cg, cb, alpha * 0.55)
+                            glVertex2f(b0[0], b0[1])
+                            glColor4f(cr, cg, cb, 0.0)
+                            glVertex2f(b1[0], b1[1])
+                        glEnd()
+
                 glPopAttrib()
                 glMatrixMode(GL_PROJECTION); glPopMatrix()
                 glMatrixMode(GL_MODELVIEW); glPopMatrix()
@@ -2430,32 +3058,28 @@ def run_game():
         pygame.mixer.stop()
         cleanup_chromatic_aberration_texture()
         cleanup_pause_overlay_texture()
+        cleanup_floor_display_list()
         try:
             if 'maze_chunks' in locals() and maze_chunks:
                 for ch in maze_chunks:
                     glDeleteLists(ch['dlist'], 1)
         except Exception:
             pass
-        if 'battery_toast_tex' in locals() and battery_toast_tex:
-            try: glDeleteTextures([battery_toast_tex[0]])
-            except Exception: pass
-        for tid in [tex_hedge, tex_snow, tex_skybox, tex_corpse, tex_jack]:
+        for tid in [tex_hedge, tex_snow, tex_skybox]:
             if tid:
-                try: glDeleteTextures([tid])
-                except Exception: pass
-        if 'jumpscare_textures' in locals():
-            for tid in jumpscare_textures:
                 try: glDeleteTextures([tid])
                 except Exception: pass
         if 'wall_text_textures' in locals():
             for item in wall_text_textures.values():
                 try: glDeleteTextures([item[0]])
                 except Exception: pass
-        if 'trap_tex_info' in locals() and trap_tex_info:
-            try: glDeleteTextures([trap_tex_info[0]])
-            except Exception: pass
-        if 'interact_tex_info' in locals() and interact_tex_info:
-            try: glDeleteTextures([interact_tex_info[0]])
+        for tex_dict in (toast_textures, prompt_e_textures, trap_banner_textures):
+            for item in tex_dict.values():
+                if item:
+                    try: glDeleteTextures([item[0]])
+                    except Exception: pass
+        if campfire_badge_tex:
+            try: glDeleteTextures([campfire_badge_tex[0]])
             except Exception: pass
 
 # ================================

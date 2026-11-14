@@ -62,4 +62,21 @@ def generate_maze(width: int, height: int):
         bx, by = dead_ends.pop()
         maze[by][bx] = 4  # Ponto de sangue / corpo
 
+    # Abre ~12% de passagens extras (loops) para rotas alternativas de fuga/furtividade
+    loop_candidates = []
+    for y in range(2, h - 2):
+        for x in range(2, w - 2):
+            if maze[y][x] != 1:
+                continue
+            horiz = (maze[y][x - 1] == 0 and maze[y][x + 1] == 0 and
+                     maze[y - 1][x] == 1 and maze[y + 1][x] == 1)
+            vert = (maze[y - 1][x] == 0 and maze[y + 1][x] == 0 and
+                    maze[y][x - 1] == 1 and maze[y][x + 1] == 1)
+            if horiz or vert:
+                loop_candidates.append((x, y))
+    if loop_candidates:
+        random.shuffle(loop_candidates)
+        for lx, ly in loop_candidates[:max(2, int(len(loop_candidates) * 0.12))]:
+            maze[ly][lx] = 0
+
     return maze, w, h

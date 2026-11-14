@@ -1,9 +1,11 @@
 import os
+import sys
 
 # Diretórios de assets
 BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-TEXTURES_DIR = os.path.join(BASE_DIR, "assets", "textures")
-SOUNDS_DIR   = os.path.join(BASE_DIR, "assets", "sounds")
+ASSET_DIR    = getattr(sys, "_MEIPASS", BASE_DIR)
+TEXTURES_DIR = os.path.join(ASSET_DIR, "assets", "textures")
+SOUNDS_DIR   = os.path.join(ASSET_DIR, "assets", "sounds")
 
 def tex(name):  return os.path.join(TEXTURES_DIR, name)
 def snd(name):  return os.path.join(SOUNDS_DIR,   name)
@@ -78,7 +80,29 @@ DIFFICULTY_PRESETS = {
 import json
 import copy
 
-SAVE_FILE = os.path.join(BASE_DIR, "save_data.json")
+
+def _resolve_save_file():
+    if not getattr(sys, "frozen", False):
+        return os.path.join(BASE_DIR, "save_data.json")
+
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    app_bundle_marker = os.path.join(".app", "Contents", "MacOS")
+    if app_bundle_marker not in exe_dir:
+        probe_path = os.path.join(exe_dir, ".write_test.tmp")
+        try:
+            with open(probe_path, "w", encoding="utf-8"):
+                pass
+            os.remove(probe_path)
+            return os.path.join(exe_dir, "save_data.json")
+        except OSError:
+            pass
+
+    user_dir = os.path.join(os.path.expanduser("~"), ".the_shining_maze")
+    os.makedirs(user_dir, exist_ok=True)
+    return os.path.join(user_dir, "save_data.json")
+
+
+SAVE_FILE = _resolve_save_file()
 
 DEFAULT_SAVE_DATA = {
     "version": 1,
